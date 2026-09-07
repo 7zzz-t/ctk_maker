@@ -66,7 +66,7 @@ A CTkMaker project is organised in four levels:
 
 ```bash
 # 1) install the customtkinter fork this build needs
-git clone https://github.com/7zzz-t/ctkmaker-core.git   # <your ctkmaker-core repo>
+git clone https://github.com/kandelucky/ctkmaker-core.git
 pip install ./ctkmaker-core            # provides the `customtkinter` package
 
 # 2) then run this editor
