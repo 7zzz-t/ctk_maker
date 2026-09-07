@@ -442,16 +442,28 @@ class LayoutOverlayManager:
         or a fill child still carrying its old free-placement width).
 
         Model-only write: no history push, no event, no recursion. Only
-        ``width`` / ``height`` are touched — x/y have no meaning under
-        pack/grid and stay untouched.
+        ``width`` / ``height`` are written back; stale ``x``/``y``
+        under a pack/grid manager are dropped (they carry no meaning
+        there) while place children keep their real coordinates.
         """
         if anchor_widget is None or child_node is None:
             return
         from app.widgets.layout_schema import managed_geometry_disabled
         managed = managed_geometry_disabled(child_node)
+        props = child_node.properties
+        # x/y under a pack/grid manager are meaningless (the geometry
+        # manager owns placement) and only ever hold stale values from
+        # an earlier place-layout era — they mislead in the Inspector
+        # and can be misread by any path that falls back to them.
+        # Drop them from the model here so the file, the panel and any
+        # reader stay clean; place-layout children (managed is empty)
+        # keep their real coordinates.
+        if "x" in managed and "x" in props:
+            del props["x"]
+        if "y" in managed and "y" in props:
+            del props["y"]
         if not managed:
             return
-        props = child_node.properties
         try:
             self.workspace.canvas.update_idletasks()
             w_px = anchor_widget.winfo_width()
