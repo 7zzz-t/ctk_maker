@@ -302,6 +302,28 @@ class WidgetLifecycle:
                 self.layout_overlay.rebalance_pack_siblings(
                     parent_node, parent_layout,
                 )
+                self._backfill_pack_children(parent_node)
+
+    def _backfill_pack_children(self, parent_node) -> None:
+        """After a pack layout pass settles (rebalance included), write
+        each managed child's actual rendered size back into the model
+        (see ``LayoutOverlayManager._backfill_actual_size``). Fresh
+        drops of vbox/hbox children are packed in ``_place_nested``
+        and never touch ``apply_child_manager``, so this is the hook
+        that keeps their fill/grow sizes canonical — e.g. a 'fill'
+        child must not keep a stale free-placement width that the grid
+        math inside it would then read.
+        """
+        from app.widgets.layout_schema import managed_geometry_disabled
+        for child in parent_node.children:
+            if not managed_geometry_disabled(child):
+                continue
+            anchor = self.anchor_views.get(child.id)
+            if anchor is None:
+                view = self.widget_views.get(child.id)
+                anchor = view[0] if view is not None else None
+            if anchor is not None:
+                self.layout_overlay._backfill_actual_size(anchor, child)
 
     def _wire_tabview_selection_refresh(self, tabview) -> None:
         """Route CTk's tab-switch callback to the selection controller
