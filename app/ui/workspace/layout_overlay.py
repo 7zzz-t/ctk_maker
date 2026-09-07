@@ -637,15 +637,15 @@ class LayoutOverlayManager:
             ly = int(child_node.properties.get("y", 0))
         except (TypeError, ValueError):
             lx = ly = 0
-        place_kwargs: dict = {
-            "x": int(lx * self.zoom.value),
-            "y": int(ly * self.zoom.value),
-        }
+        # CTk forbids ``width=`` / ``height=`` in place() itself — pin
+        # composite dimensions via configure() first (same pattern as
+        # the pack/grid branches), then place with x/y only.
         if is_composite:
-            place_kwargs.update(
-                _composite_place_size(lw, lh, self.zoom.value),
-            )
+            _composite_configure(anchor_widget, lw, lh, self.zoom.value)
         try:
-            anchor_widget.place(**place_kwargs)
+            anchor_widget.place(
+                x=int(lx * self.zoom.value),
+                y=int(ly * self.zoom.value),
+            )
         except tk.TclError:
             pass

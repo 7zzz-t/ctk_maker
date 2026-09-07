@@ -558,15 +558,19 @@ class WidgetLifecycle:
             # overriding the grid placement we're about to apply.
             return
         else:
-            place_kwargs: dict = {
-                "x": int(lx * self.zoom.value),
-                "y": int(ly * self.zoom.value),
-            }
+            # Composite widgets don't auto-size — pin the configured
+            # dimensions via configure() BEFORE place(): CTk forbids
+            # width/height in place() itself (they must ride on the
+            # constructor / configure), so sizing uses a separate call
+            # exactly like the pack branch above.
             if is_composite:
-                place_kwargs.update(
-                    _composite_place_size(lw, lh, self.zoom.value),
+                _composite_configure(
+                    anchor_widget, lw, lh, self.zoom.value,
                 )
-            anchor_widget.place(**place_kwargs)
+            anchor_widget.place(
+                x=int(lx * self.zoom.value),
+                y=int(ly * self.zoom.value),
+            )
 
     def create_widget_subtree(self, node) -> None:
         self.on_widget_added(node)
