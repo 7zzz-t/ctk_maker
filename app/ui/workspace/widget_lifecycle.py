@@ -302,7 +302,21 @@ class WidgetLifecycle:
                 self.layout_overlay.rebalance_pack_siblings(
                     parent_node, parent_layout,
                 )
-                self._backfill_pack_children(parent_node)
+                self._schedule_pack_backfill(parent_node)
+
+    def _schedule_pack_backfill(self, parent_node) -> None:
+        """Backfill pack children once the geometry pass has settled.
+        Reading winfo right after pack() can catch the parent's inner
+        width before it is laid out (a fresh pack child in a
+        scrollable frame then reports its own req width instead of the
+        stretched fill width), so run on idle instead of inline.
+        """
+        try:
+            self.workspace.after_idle(
+                lambda: self._backfill_pack_children(parent_node),
+            )
+        except tk.TclError:
+            pass
 
     def _backfill_pack_children(self, parent_node) -> None:
         """After a pack layout pass settles (rebalance included), write
