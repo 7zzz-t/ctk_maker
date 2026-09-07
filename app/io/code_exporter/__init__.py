@@ -1979,6 +1979,17 @@ def _emit_subtree(
     # built at 240×180 down to the natural size of whatever vbox
     # children it holds. Builder canvas already does this at widget
     # creation — the exported runtime needs it too.
+    #
+    # Auto-height CTkFrames (height<=0) are the exception: propagate
+    # stays on so the container grows to its content (scrollable
+    # content), and rows size to their content instead of being
+    # equal-split — only columns stretch to fill the width.
+    _auto_h = False
+    if node.widget_type == "CTkFrame":
+        try:
+            _auto_h = int(node.properties.get("height", 0) or 0) <= 0
+        except (TypeError, ValueError):
+            _auto_h = False
     if (
         child_layout != DEFAULT_LAYOUT_TYPE and node.children
         and node.widget_type != "CTkScrollableFrame"
@@ -1988,10 +1999,14 @@ def _emit_subtree(
         # — ``grid_propagate(False)`` would raise ``TypeError`` at
         # runtime. Pinning is handled in SF's own ``export_state``
         # via ``_parent_frame.grid_propagate(False)``.
-        lines.append(f"{child_master}.pack_propagate(False)")
-        lines.append(f"{child_master}.grid_propagate(False)")
+        if not _auto_h:
+            lines.append(f"{child_master}.pack_propagate(False)")
+            lines.append(f"{child_master}.grid_propagate(False)")
         if child_layout == "grid":
             for rr in range(child_rows):
+                if _auto_h:
+                    # Content-sized row — no weight, no uniform split.
+                    continue
                 lines.append(
                     f'{child_master}.grid_rowconfigure({rr}, weight=1, uniform="row")',
                 )

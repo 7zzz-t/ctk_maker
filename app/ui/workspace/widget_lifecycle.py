@@ -230,7 +230,7 @@ class WidgetLifecycle:
             descriptor, node, master,
         )
         self._disable_container_propagate(
-            widget, anchor_widget, descriptor,
+            widget, anchor_widget, descriptor, node,
         )
         try:
             lx = int(node.properties.get("x", 0))
@@ -407,8 +407,24 @@ class WidgetLifecycle:
             self.anchor_views[node.id] = anchor_widget
         return widget, anchor_widget
 
+    @staticmethod
+    def _auto_height(node) -> bool:
+        """Height 0 (or unset/None) on a CTkFrame means auto: the
+        container's height is driven by its content instead of a fixed
+        number, so it can exceed a scrollable viewport and scroll.
+        """
+        if node is None:
+            return False
+        props = node.properties
+        if props is None:
+            return False
+        try:
+            return int(props.get("height", 0) or 0) <= 0
+        except (TypeError, ValueError):
+            return True
+
     def _disable_container_propagate(
-        self, widget, anchor_widget, descriptor,
+        self, widget, anchor_widget, descriptor, node=None,
     ) -> None:
         """Pin container size — tk's default ``propagate(True)`` would
         shrink a Frame to fit its children the moment a vbox/hbox
@@ -417,15 +433,19 @@ class WidgetLifecycle:
         children don't trigger propagate anyway so non-pack modes
         are unaffected.
 
-        For composite containers (CTkScrollableFrame), only the OUTER
-        anchor widget is pinned — the INNER frame must keep
-        propagate(True) so it grows with packed children, which is
-        what drives CTk's ``<Configure>``-bound scrollregion update.
-        Disabling propagate on the inner frame would leave children
-        packed but clipped to the frame's initial 0-height natural
-        size (invisible on canvas while still in the model).
+        Auto-height containers (CTkFrame with height<=0) keep
+        propagate(True) on purpose: their height is driven by their
+        packed children, so the container grows to the content (e.g.
+        inside a scrollable frame where content may exceed the
+        viewport). Composite containers behave as described below.
         """
         if not getattr(descriptor, "is_container", False):
+            return
+        if (
+            node is not None
+            and node.widget_type == "CTkFrame"
+            and self._auto_height(node)
+        ):
             return
         targets = (
             {anchor_widget} if widget is not anchor_widget
