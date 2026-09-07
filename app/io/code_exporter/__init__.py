@@ -1949,6 +1949,7 @@ def _emit_subtree(
     parent_cols: int = 1,
     parent_rows: int = 1,
     radio_var_map: dict[str, tuple[str, str]] | None = None,
+    parent_is_scroll: bool = False,
 ) -> None:
     var_name = id_to_var[node.id]
     lines.extend(
@@ -1957,6 +1958,7 @@ def _emit_subtree(
             parent_layout, parent_spacing, child_index,
             parent_cols, parent_rows,
             radio_var_map=radio_var_map,
+            parent_is_scroll=parent_is_scroll,
         ),
     )
     lines.append("")
@@ -2074,6 +2076,9 @@ def _emit_subtree(
             parent_cols=child_cols,
             parent_rows=child_rows,
             radio_var_map=radio_var_map,
+            parent_is_scroll=(
+                node.widget_type == "CTkScrollableFrame"
+            ),
         )
 
     # v1.10.2 flex-shrink: bind the container's <Configure> so the
@@ -2119,6 +2124,7 @@ def _emit_widget(
     parent_cols: int = 1,
     parent_rows: int = 1,
     radio_var_map: dict[str, tuple[str, str]] | None = None,
+    parent_is_scroll: bool = False,
 ) -> list[str]:
     descriptor = get_descriptor(node.widget_type)
     if descriptor is None:
@@ -2452,6 +2458,7 @@ def _emit_widget(
         _geometry_call(
             full_name, props, parent_layout, parent_spacing,
             child_index, parent_cols, parent_rows,
+            parent_is_scroll=parent_is_scroll,
         ),
     )
 
@@ -2569,6 +2576,7 @@ def _geometry_call(
     full_name: str, props: dict, parent_layout: str,
     parent_spacing: int = 0, child_index: int = 0,
     parent_cols: int = 1, parent_rows: int = 1,
+    parent_is_scroll: bool = False,
 ) -> str:
     layout = normalise_layout_type(parent_layout)
     side = pack_side_for(layout)
@@ -2583,8 +2591,17 @@ def _geometry_call(
             cross = "y" if layout == "hbox" else "x"
             parts.append(f'fill="{cross}"')
         elif stretch == "grow":
-            parts.append('fill="both"')
-            parts.append("expand=True")
+            if parent_is_scroll:
+                # Scrollable content is content-sized: the main axis
+                # must stay at the child's own requested height so the
+                # scroll region keeps the overflow. ``expand=True``
+                # would stretch the child to the viewport once layout
+                # settles and collapse the scrollbar.
+                cross = "y" if layout == "hbox" else "x"
+                parts.append(f'fill="{cross}"')
+            else:
+                parts.append('fill="both"')
+                parts.append("expand=True")
         half = parent_spacing // 2
         if half > 0:
             if layout == "hbox":
