@@ -1071,6 +1071,10 @@ class CommitMixin:
         if pname == "width":
             return max(1, min(value, max(1, container_w - node_x)))
         if pname == "height":
+            if node.widget_type == "CTkFrame" and value <= 0:
+                # 0 = auto-height container (content-sized; grows to
+                # its children, e.g. inside a scrollable frame).
+                return 0
             return max(1, min(value, max(1, container_h - node_y)))
         return value
 
