@@ -420,15 +420,64 @@ class LayoutOverlayManager:
                 anchor_widget, parent_node, child_node,
                 mgr_kwargs, lw, lh, is_composite,
             )
+            self._backfill_actual_size(anchor_widget, child_node)
         elif manager == "grid":
             self._apply_grid_manager(
                 anchor_widget, parent_node, child_node,
                 parent_props, child_props,
             )
+            self._backfill_actual_size(anchor_widget, child_node)
         else:
             self._apply_place_manager(
                 anchor_widget, child_node, lw, lh, is_composite,
             )
+
+    def _backfill_actual_size(self, anchor_widget, child_node) -> None:
+        """Write the child's actual rendered on-canvas size back into
+        the model (doc coords). Pack/grid managers own the child's
+        geometry, so the canvas — not the user — is authoritative;
+        this keeps ``node.properties`` in sync with what is drawn and
+        with what the exported preview will construct, clearing stale
+        editor-era width/height (e.g. a 343-high label in a ~30px row,
+        or a fill child still carrying its old free-placement width).
+
+        Model-only write: no history push, no event, no recursion. Only
+        ``width`` / ``height`` are touched — x/y have no meaning under
+        pack/grid and stay untouched.
+        """
+        if anchor_widget is None or child_node is None:
+            return
+        from app.widgets.layout_schema import managed_geometry_disabled
+        managed = managed_geometry_disabled(child_node)
+        if not managed:
+            return
+        props = child_node.properties
+        try:
+            self.workspace.canvas.update_idletasks()
+            w_px = anchor_widget.winfo_width()
+            h_px = anchor_widget.winfo_height()
+        except tk.TclError:
+            return
+        if w_px <= 1 and h_px <= 1:
+            return
+        # Physical px → doc coords. canvas_scale = user zoom × DPI
+        # scaling, the same factor create_window uses for canvas items.
+        scale = getattr(self.zoom, "canvas_scale", None) or (
+            self.zoom.value or 1.0
+        )
+        if not scale or scale <= 0:
+            return
+        # Only axes the layout manager owns are overwritten — user
+        # owned dimensions (fixed children, a fill child's main axis)
+        # stay exactly as the user set them.
+        if "width" in managed:
+            back_w = max(1, int(round(w_px / scale)))
+            if props.get("width") != back_w:
+                props["width"] = back_w
+        if "height" in managed:
+            back_h = max(1, int(round(h_px / scale)))
+            if props.get("height") != back_h:
+                props["height"] = back_h
 
     def _apply_pack_manager(
         self, anchor_widget, parent_node, child_node,
@@ -656,24 +705,6 @@ class LayoutOverlayManager:
             anchor_widget.place(**place_kw)
         except tk.TclError:
             pass
-        # Grid backfill — the grid manager owns this child's on-canvas
-        # size (stretch resolved via grid_sticky), so write the
-        # cell-allocated dimensions back into the model in doc coords.
-        # Without this the node keeps a stale editor-era width/height
-        # (e.g. 343 left over from a pre-grid drag), which widget
-        # construction — on canvas AND in the exported preview — reads
-        # and turns into a canvas-vs-preview mismatch (a 343-high label
-        # in a ~30-high cell). Model-only write: no history push, no
-        # event, so it can't recurse or spam undo.
-        if cfg_w is not None and cfg_h is not None:
-            zoom = self.zoom.value or 1.0
-            back_w = max(1, int(round(cfg_w / zoom)))
-            back_h = max(1, int(round(cfg_h / zoom)))
-            props = child_node.properties
-            if props.get("width") != back_w:
-                props["width"] = back_w
-            if props.get("height") != back_h:
-                props["height"] = back_h
 
     def _apply_place_manager(
         self, anchor_widget, child_node,
