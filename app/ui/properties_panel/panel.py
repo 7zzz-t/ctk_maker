@@ -1794,6 +1794,13 @@ class PropertiesPanel(CommitMixin, SchemaMixin, ctk.CTkFrame):
         the bind / unbind flows match the right-click path."""
         if self.current_id is None:
             return
+        # Rows the layout manager has marked read-only (x/y on a
+        # pack child, cross-axis on a fill/grow child, …) must not
+        # take a variable binding either — the value would be ignored
+        # or overwritten by the geometry manager, and the binding chip
+        # would promise a live link that never fires.
+        if self._disabled_states.get(pname):
+            return
         node = self.project.get_widget(self.current_id)
         if node is None:
             return

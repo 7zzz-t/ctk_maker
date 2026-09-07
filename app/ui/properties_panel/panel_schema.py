@@ -1812,8 +1812,22 @@ class SchemaMixin:
         stretch = str(node.properties.get("stretch", "fixed"))
         main_axis = "width" if parent_layout == "hbox" else "height"
         cross_axis = "height" if parent_layout == "hbox" else "width"
+        try:
+            parent_main = int(
+                node.parent.properties.get(main_axis, 0) or 0,
+            )
+        except (TypeError, ValueError):
+            parent_main = 0
         if stretch == "grow":
-            self._disabled_states[main_axis] = True
+            # Main axis is auto-distributed by rebalance_pack_siblings
+            # only when the parent has a fixed main-axis size. On
+            # free-height containers (CTkScrollableFrame content, or
+            # any container whose main axis is content-sized) the
+            # rebalance helper is a no-op and the child keeps its own
+            # main-axis property — mirror that here so the field stays
+            # editable (canvas resize handles already honour it).
+            if parent_main > 0:
+                self._disabled_states[main_axis] = True
             self._disabled_states[cross_axis] = True
         elif stretch == "fill":
             self._disabled_states[cross_axis] = True
