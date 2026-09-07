@@ -1,0 +1,1478 @@
+"""Variables inspector — manages shared-state variables.
+
+``VariablesPanel`` is an embeddable ``CTkFrame`` (Treeview + toolbar)
+parametrised by scope: a panel either lists ``project.variables``
+(``scope="global"``) or one document's ``local_variables``
+(``scope="local"`` + ``document_id``). ``VariablesWindow`` is a
+floating wrapper that holds one global panel and one local panel
+switched by tabs; the local panel picks its document through a
+toolbar dropdown rather than following the workspace's active window. Variables are the foundation of the
+visual scripting story (Phase 1): widgets bind to a variable via the
+Properties panel, and the runtime keeps every bound widget in sync
+via Tkinter's built-in ``textvariable`` / ``variable`` mechanism.
+
+The panel is a read-only mirror of its scope's storage; mutations push
+Command objects through ``project.history`` so undo / redo Just Works.
+"""
+
+from __future__ import annotations
+
+import tkinter as tk
+from tkinter import ttk
+from typing import TYPE_CHECKING, Callable
+
+import customtkinter as ctk
+
+import app.ui.stk as stk
+
+from app.core.commands import (
+    AddVariableCommand,
+    ChangeVariableDefaultCommand,
+    ChangeVariableTypeCommand,
+    DeleteVariableCommand,
+    RenameVariableCommand,
+)
+from app.core.i18n import tr
+from app.ui import style
+from app.ui.dialogs.message import ask_yes_no
+from app.ui.managed_window import ManagedToplevel
+from app.ui.system_fonts import ui_font
+from app.ui.toolbar import _attach_tooltip
+from app.core.variables import (
+    COLOR_DEFAULT,
+    VAR_TYPES,
+    coerce_default_for_type,
+    is_valid_hex,
+    sanitize_var_name,
+)
+
+if TYPE_CHECKING:
+    from app.core.project import Project
+
+# Color / spacing tokens are sourced from app.ui.style — local aliases
+# kept so the rest of this file stays terse.
+BG = style.BG
+PANEL_BG = style.PANEL_BG
+TOOLBAR_BG = style.TOOLBAR_BG
+TREE_BG = style.TREE_BG
+TREE_FG = style.TREE_FG
+TREE_SELECTED_BG = style.TREE_SELECTED_BG
+TREE_HEADING_BG = style.TREE_HEADING_BG
+TREE_HEADING_FG = style.TREE_HEADING_FG
+EMPTY_FG = style.EMPTY_FG
+BORDER = style.BORDER
+HEADER_BG = style.HEADER_BG
+SECONDARY_BG = style.SECONDARY_BG
+SECONDARY_HOVER = style.SECONDARY_HOVER
+DANGER_HOVER = style.DANGER_HOVER
+BUTTON_RADIUS = style.BUTTON_RADIUS
+
+DIALOG_W = 420
+DIALOG_H = 360
+TREE_ROW_HEIGHT = style.TREE_ROW_HEIGHT
+TREE_FONT_SIZE = style.TREE_FONT_SIZE
+
+EMPTY_TEXT_GLOBAL = "No global variables yet — click + Add to create one"
+EMPTY_TEXT_LOCAL = "No local variables for this document — click + Add"
+
+TYPE_LABELS = {
+    "str": tr("variables.type.str", "String"),
+    "int": tr("variables.type.int", "Integer"),
+    "float": tr("variables.type.float", "Float"),
+    "bool": tr("variables.type.bool", "Boolean"),
+    "color": tr("variables.type.color", "Color"),
+}
+LABEL_TO_TYPE = {label: t for t, label in TYPE_LABELS.items()}
+
+# Auto-fill values shown in the Add Variable dialog. Letting the user
+# hit OK on a brand-new dialog and end up with a sensible
+# placeholder cuts the create-flow from "type a name + a default" to
+# "click +Add → click OK". Suffix dedup at add_variable time turns
+# repeated OKs into ``StringValue``, ``StringValue_2``, …
+TYPE_DEFAULT_NAMES = {
+    "str": "StringValue",
+    "int": "IntValue",
+    "float": "FloatValue",
+    "bool": "BoolValue",
+    "color": "ColorValue",
+}
+TYPE_DEFAULT_VALUES = {
+    "str": "",
+    "int": "0",
+    "float": "0.0",
+    "bool": "False",
+    "color": "#6366f1",
+}
+
+# Pixel size of the colour swatch rendered in the tree's #0 column
+# for ``color``-typed rows. 12×12 fits comfortably inside the 22px
+# row height with breathing room top/bottom.
+SWATCH_PX = 12
+
+
+class VariablesPanel(ctk.CTkFrame):
+    """Treeview-backed list of variables for one scope.
+
+    ``scope="global"`` mirrors ``project.variables``;
+    ``scope="local"`` mirrors a single ``Document.local_variables``
+    (``document_id`` picks which one). Other-scope variables are
+    invisible to this panel — the visibility rule is enforced here so
+    the tree, the count column, and command targets all agree.
+    """
+
+    def __init__(
+        self, parent, project: "Project",
+        scope: str = "global",
+        document_id: str | None = None,
+    ):
+        super().__init__(
+            parent, fg_color=PANEL_BG, corner_radius=0, border_width=0,
+        )
+        self.project = project
+        self.scope = scope if scope in ("global", "local") else "global"
+        self.document_id = document_id if self.scope == "local" else None
+        self._doc_label_to_id: dict[str, str] = {}
+        self._bus_subs: list[tuple[str, Callable]] = []
+        # ttk.Treeview cells render text or one image per row (#0 column
+        # only), so colour swatches live as cached PhotoImages keyed by
+        # their hex string. Cache lifetime == panel lifetime; reset on
+        # destroy. Bounded in practice — users rarely declare more than
+        # a handful of colour vars per project.
+        self._swatch_cache: dict[str, tk.PhotoImage] = {}
+        self._build_toolbar()
+        self._build_doc_row()
+        self._build_tree()
+        bus = project.event_bus
+        for event_name in (
+            "variable_added", "variable_removed", "variable_renamed",
+            "variable_type_changed", "variable_default_changed",
+            "widget_added", "widget_removed", "property_changed",
+            # Project load / project switch publishes
+            # ``active_document_changed`` (3x during load_project).
+            # Without this subscription the panel keeps showing the
+            # previous project's empty list because variable_* events
+            # don't fire when ``project.variables`` is replaced
+            # wholesale by the loader.
+            "active_document_changed",
+            # Keep the local panel's document dropdown (and its
+            # fallback re-point when the picked doc disappears) in
+            # step with the project's window list.
+            "document_added", "document_removed",
+            "document_renamed", "documents_reordered",
+        ):
+            bus.subscribe(event_name, self._on_changed)
+            self._bus_subs.append((event_name, self._on_changed))
+        self.after(0, self._refresh)
+
+    # ------------------------------------------------------------------
+    # Build
+    # ------------------------------------------------------------------
+    def _build_toolbar(self) -> None:
+        bar = style.make_toolbar(self)
+        bar.pack(fill="x")
+
+        self._add_btn = style.primary_button(
+            bar, tr("variables.toolbar.add", "+ Add"), command=self._on_add, width=70,
+        )
+        # Local panels colour the + Add button with a darkened local
+        # accent so the Add affordance reads as "local-scoped" without
+        # being as bright as the chrome icon's orange.
+        if self.scope == "local":
+            self._add_btn.configure(fg_color="#8a541a", hover_color="#a0651e")
+        style.pack_toolbar_button(self._add_btn, first=True)
+
+        self._edit_btn = style.secondary_button(
+            bar, tr("variables.toolbar.edit", "Edit"), command=self._on_edit, width=60,
+        )
+        style.pack_toolbar_button(self._edit_btn)
+
+        self._dup_btn = style.secondary_button(
+            bar, tr("variables.toolbar.duplicate", "Duplicate"), command=self._on_duplicate, width=78,
+        )
+        style.pack_toolbar_button(self._dup_btn)
+
+        self._del_btn = style.secondary_button(
+            bar, tr("variables.toolbar.delete", "Delete"), command=self._on_delete, width=64,
+        )
+        style.pack_toolbar_button(self._del_btn)
+
+    def _build_doc_row(self) -> None:
+        """Bottom strip (local scope only): a labelled dropdown
+        picking which window's local variables the panel lists. The
+        panel deliberately does NOT follow the workspace's active
+        window — the choice here is the single source of truth."""
+        self._doc_menu: ctk.CTkOptionMenu | None = None
+        if self.scope != "local":
+            return
+        row = stk.Frame(
+            self, bg=TOOLBAR_BG, height=46, highlightthickness=0,
+        )
+        row.pack_propagate(False)
+        row.pack(side="bottom", fill="x")
+        stk.Label(
+            row, text=tr("variables.doc_row.label", "Variables of window:"),
+            bg=TOOLBAR_BG, fg="#999999", font=ui_font(11),
+        ).pack(side="left", padx=(style.TOOLBAR_PADX, 8))
+        self._doc_menu = ctk.CTkOptionMenu(
+            row, values=[""],
+            command=self._on_doc_selected,
+            width=210, height=32,
+            dynamic_resizing=False,
+            corner_radius=BUTTON_RADIUS,
+            font=ui_font(style.BUTTON_FONT_SIZE),
+            fg_color=SECONDARY_BG, button_color=SECONDARY_BG,
+            button_hover_color=SECONDARY_HOVER,
+            text_color=TREE_FG,
+            dropdown_fg_color=HEADER_BG,
+            dropdown_hover_color=TREE_SELECTED_BG,
+            dropdown_text_color=TREE_FG,
+        )
+        self._doc_menu.pack(side="left", pady=7)
+        _attach_tooltip(
+            self._doc_menu,
+            tr(
+                "variables.doc_row.tooltip",
+                "To see another window's local variables, pick that window here",
+            ),
+        )
+
+    def _build_tree(self) -> None:
+        wrap = stk.Frame(self, bg=BG, highlightthickness=0)
+        wrap.pack(fill="both", expand=True)
+
+        style_name = "Variables.Treeview"
+        style.apply_tree_style(self, style_name)
+
+        # ``show="tree headings"`` keeps the #0 column visible so we
+        # can hang a small colour swatch off rows whose variable type
+        # is ``color``. Width is fixed and narrow — non-colour rows
+        # leave the cell blank, which reads as a small left margin.
+        self.tree = ttk.Treeview(
+            wrap,
+            columns=("type", "default", "uses"),
+            show="tree headings",
+            style=style_name,
+            selectmode="browse",
+        )
+        self.tree.heading("#0", text="")
+        self.tree.heading("type", text=tr("variables.tree.name_type", "Name / Type"))
+        self.tree.heading("default", text=tr("variables.tree.default", "Default"))
+        self.tree.heading("uses", text=tr("variables.tree.used_by", "Used by"))
+        self.tree.column("#0", width=24, minwidth=24, stretch=False, anchor="center")
+        self.tree.column("type", width=180, anchor="w")
+        self.tree.column("default", width=110, anchor="w")
+        self.tree.column("uses", width=80, anchor="center")
+        self.tree.tag_configure("empty", foreground=EMPTY_FG)
+        self.tree.bind("<Double-Button-1>", self._on_double_click)
+
+        vsb = style.styled_scrollbar(wrap, command=self.tree.yview)
+        self.tree.configure(yscrollcommand=vsb.set)
+        self.tree.pack(side="left", fill="both", expand=True)
+        vsb.pack(side="right", fill="y")
+
+    # ------------------------------------------------------------------
+    # Refresh
+    # ------------------------------------------------------------------
+    def _on_changed(self, *_args, **_kwargs) -> None:
+        self._refresh()
+
+    def _scope_variables(self) -> list:
+        """Return the list of variables this panel owns. Locals
+        defensively handle a stale ``document_id`` (the doc was
+        deleted between window-open and this refresh) by yielding [].
+        """
+        if self.scope == "local":
+            doc = (
+                self.project.get_document(self.document_id)
+                if self.document_id else None
+            )
+            return list(doc.local_variables) if doc is not None else []
+        return list(self.project.variables or [])
+
+    def _swatch_for(self, hex_value: str) -> tk.PhotoImage | None:
+        """Build (and cache) a flat-fill ``PhotoImage`` for ``hex_value``.
+        Returns ``None`` on invalid hex / Tk failure so the caller can
+        skip the image kwarg cleanly. The image is owned by the panel —
+        Tk would garbage-collect a freshly built PhotoImage between
+        the insert call and the next event loop tick otherwise.
+        """
+        cached = self._swatch_cache.get(hex_value)
+        if cached is not None:
+            return cached
+        try:
+            img = tk.PhotoImage(
+                master=self, width=SWATCH_PX, height=SWATCH_PX,
+            )
+            img.put(hex_value, to=(0, 0, SWATCH_PX, SWATCH_PX))
+        except tk.TclError:
+            return None
+        self._swatch_cache[hex_value] = img
+        return img
+
+    def _refresh(self) -> None:
+        # The initial refresh arrives via after(0) and bus events can
+        # race widget teardown — a dead tree means the panel is gone,
+        # so there is nothing left to redraw.
+        try:
+            if not self.tree.winfo_exists():
+                return
+        except tk.TclError:
+            return
+        if self.scope == "local":
+            self._ensure_valid_document()
+            self._sync_doc_dropdown()
+        for iid in self.tree.get_children(""):
+            self.tree.delete(iid)
+        variables = self._scope_variables()
+        if not variables:
+            self.tree.insert(
+                "", "end", iid="empty",
+                values=(
+                    tr(
+                        "variables.empty.local",
+                        "No local variables for this document — click + Add",
+                    ) if self.scope == "local"
+                    else tr(
+                        "variables.empty.global",
+                        "No global variables yet — click + Add to create one",
+                    ),
+                    "", "",
+                ),
+                tags=("empty",),
+            )
+            self._set_buttons_enabled(False)
+            return
+        for v in variables:
+            label = f"{v.name}  ({TYPE_LABELS.get(v.type, v.type)})"
+            uses = sum(1 for _ in self.project.iter_bindings_for(v.id))
+            kwargs: dict = {
+                "values": (label, v.default, str(uses)),
+            }
+            if v.type == "color":
+                swatch = self._swatch_for(v.default or COLOR_DEFAULT)
+                if swatch is not None:
+                    kwargs["image"] = swatch
+            self.tree.insert("", "end", iid=v.id, **kwargs)
+        self._set_buttons_enabled(True)
+
+    # ------------------------------------------------------------------
+    # Document picker (local scope)
+    # ------------------------------------------------------------------
+    def set_document(self, document_id: str | None) -> None:
+        """Re-point the local panel at another document and refresh.
+        No-op for the global panel, unknown ids, and same-doc calls."""
+        if self.scope != "local" or not document_id:
+            return
+        doc = self.project.get_document(document_id)
+        if doc is None or doc.id == self.document_id:
+            return
+        self.document_id = doc.id
+        self._refresh()
+
+    def _ensure_valid_document(self) -> None:
+        """Fall back to the active document when the picked one no
+        longer exists (deleted / project switch). The panel must never
+        sit on a dangling id while other windows are available."""
+        if self.document_id is not None:
+            if self.project.get_document(self.document_id) is not None:
+                return
+        docs = self.project.documents
+        self.document_id = (
+            self.project.active_document.id if docs else None
+        )
+
+    def _sync_doc_dropdown(self) -> None:
+        """Rebuild the dropdown's window list and re-select the row
+        for ``document_id``. Duplicate document names are disambiguated
+        with a ``(n)`` suffix so every label maps to exactly one id."""
+        if self._doc_menu is None:
+            return
+        self._doc_label_to_id = {}
+        labels: list[str] = []
+        for doc in self.project.documents:
+            base = doc.name or tr("variables.doc_row.default_window", "Window")
+            if len(base) > 24:
+                base = base[:23] + "…"
+            label, n = base, 2
+            while label in self._doc_label_to_id:
+                label = f"{base} ({n})"
+                n += 1
+            self._doc_label_to_id[label] = doc.id
+            labels.append(label)
+        current = next(
+            (
+                lbl for lbl, did in self._doc_label_to_id.items()
+                if did == self.document_id
+            ),
+            labels[0] if labels else "",
+        )
+        try:
+            self._doc_menu.configure(values=labels or [""])
+            self._doc_menu.set(current)
+        except tk.TclError:
+            pass
+
+    def _on_doc_selected(self, label: str) -> None:
+        self.set_document(self._doc_label_to_id.get(label))
+
+    def _set_buttons_enabled(self, has_any: bool) -> None:
+        state = "normal" if has_any else "disabled"
+        for btn in (self._edit_btn, self._dup_btn, self._del_btn):
+            try:
+                btn.configure(state=state)
+            except tk.TclError:
+                pass
+
+    def _selected_var_id(self) -> str | None:
+        sel = self.tree.selection()
+        if not sel or sel[0] == "empty":
+            return None
+        return sel[0]
+
+    def select_variable(self, var_id: str) -> bool:
+        """Select and scroll into view the row for ``var_id``. Returns
+        ``True`` on success, ``False`` if the row isn't in this panel
+        (different scope) or the tree hasn't populated yet."""
+        try:
+            if not self.tree.exists(var_id):
+                return False
+            self.tree.selection_set(var_id)
+            self.tree.focus(var_id)
+            self.tree.see(var_id)
+        except tk.TclError:
+            return False
+        return True
+
+    # ------------------------------------------------------------------
+    # Actions
+    # ------------------------------------------------------------------
+    def _on_add(self) -> None:
+        existing_names = {v.name for v in self._scope_variables()}
+        # Pre-fill the Add dialog so a default OK lands a usable
+        # variable. Type change inside the dialog re-syncs the
+        # auto-fill while leaving any user-typed value alone.
+        dialog = VariableEditDialog(
+            self.winfo_toplevel(),
+            title=(
+                tr("variables.add_dialog.local", "Add local variable")
+                if self.scope == "local"
+                else tr("variables.add_dialog.global", "Add variable")
+            ),
+            initial_name=TYPE_DEFAULT_NAMES["str"],
+            initial_type="str",
+            initial_default=TYPE_DEFAULT_VALUES["str"],
+            existing_names=existing_names,
+        )
+        dialog.wait_window()
+        if dialog.result is None:
+            return
+        name, var_type, default = dialog.result
+        # Apply through Project so dedupe + coercion happen first;
+        # then push the command using the realised entry's snapshot.
+        entry = self.project.add_variable(
+            name, var_type, default,
+            scope=self.scope, document_id=self.document_id,
+        )
+        target_list = self._scope_variables()
+        self.project.history.push(
+            AddVariableCommand(
+                entry.to_dict(), len(target_list) - 1,
+                scope=self.scope, document_id=self.document_id,
+            ),
+        )
+        try:
+            self.tree.selection_set(entry.id)
+            self.tree.see(entry.id)
+        except tk.TclError:
+            pass
+
+    def _on_edit(self) -> None:
+        var_id = self._selected_var_id()
+        if var_id is None:
+            return
+        entry = self.project.get_variable(var_id)
+        if entry is None:
+            return
+        existing = {
+            v.name for v in self._scope_variables() if v.id != var_id
+        }
+        dialog = VariableEditDialog(
+            self.winfo_toplevel(),
+            title=tr("variables.edit_dialog.title", "Edit variable: {name}").format(
+                name=entry.name,
+            ),
+            initial_name=entry.name,
+            initial_type=entry.type,
+            initial_default=entry.default,
+            existing_names=existing,
+        )
+        dialog.wait_window()
+        if dialog.result is None:
+            return
+        new_name, new_type, new_default = dialog.result
+        old_name, old_type, old_default = (
+            entry.name, entry.type, entry.default,
+        )
+        # Push individual commands per field that changed so undo /
+        # redo each field separately. Order: type first (because it
+        # rewrites default), then default, then rename.
+        if new_type != old_type:
+            self.project.change_variable_type(var_id, new_type)
+            self.project.change_variable_default(var_id, new_default)
+            self.project.history.push(
+                ChangeVariableTypeCommand(
+                    var_id, old_type, new_type,
+                    old_default, new_default,
+                ),
+            )
+        elif new_default != old_default:
+            self.project.change_variable_default(var_id, new_default)
+            self.project.history.push(
+                ChangeVariableDefaultCommand(
+                    var_id, old_default, new_default,
+                ),
+            )
+        if new_name != old_name:
+            self.project.rename_variable(var_id, new_name)
+            self.project.history.push(
+                RenameVariableCommand(var_id, old_name, new_name),
+            )
+
+    def _on_duplicate(self) -> None:
+        var_id = self._selected_var_id()
+        if var_id is None:
+            return
+        entry = self.project.get_variable(var_id)
+        if entry is None:
+            return
+        new_entry = self.project.add_variable(
+            f"{entry.name}_copy", entry.type, entry.default,
+            scope=self.scope, document_id=self.document_id,
+        )
+        target_list = self._scope_variables()
+        self.project.history.push(
+            AddVariableCommand(
+                new_entry.to_dict(), len(target_list) - 1,
+                scope=self.scope, document_id=self.document_id,
+            ),
+        )
+        try:
+            self.tree.selection_set(new_entry.id)
+            self.tree.see(new_entry.id)
+        except tk.TclError:
+            pass
+
+    def _on_delete(self) -> None:
+        var_id = self._selected_var_id()
+        if var_id is None:
+            return
+        entry = self.project.get_variable(var_id)
+        if entry is None:
+            return
+        binding_count = sum(
+            1 for _ in self.project.iter_bindings_for(var_id)
+        )
+        msg = (
+            tr("variables.delete.confirm", "Delete variable '{name}'?").format(
+                name=entry.name,
+            )
+            if binding_count == 0
+            else tr(
+                "variables.delete.confirm_with_bindings",
+                "Delete variable '{name}'?\n\n"
+                "This will unbind it from {count} widget{s}.\n"
+                "(Undo restores everything.)",
+            ).format(
+                name=entry.name,
+                count=binding_count,
+                s="s" if binding_count != 1 else "",
+            )
+        )
+        if not ask_yes_no(
+            tr("variables.delete.title", "Delete variable"), msg,
+            parent=self.winfo_toplevel(),
+            danger=True,
+            yes_text=tr("variables.delete.yes", "Delete"),
+            no_text=tr("variables.delete.no", "Cancel"),
+        ):
+            return
+        # Snapshot bindings BEFORE the cascade-unbind so undo can
+        # rewrite the same var: tokens back into the right slots.
+        bindings: list[tuple[str, str, str]] = [
+            (n.id, pn, n.properties[pn])
+            for n, pn in self.project.iter_bindings_for(var_id)
+        ]
+        target_list = self._scope_variables()
+        try:
+            index = target_list.index(entry)
+        except ValueError:
+            index = len(target_list)
+        entry_dict = entry.to_dict()
+        self.project.remove_variable(var_id)
+        self.project.history.push(
+            DeleteVariableCommand(
+                entry_dict, index, bindings,
+                scope=self.scope, document_id=self.document_id,
+            ),
+        )
+
+    def _on_double_click(self, _event) -> None:
+        if self._selected_var_id() is None:
+            return
+        self._on_edit()
+
+    # ------------------------------------------------------------------
+    # Teardown
+    # ------------------------------------------------------------------
+    def destroy(self) -> None:
+        self._unsubscribe_bus()
+        super().destroy()
+
+    def _unsubscribe_bus(self) -> None:
+        try:
+            bus = self.project.event_bus
+            for event_name, handler in self._bus_subs:
+                bus.unsubscribe(event_name, handler)
+        except Exception:
+            pass
+        self._bus_subs = []
+
+
+class ReparentVariablesDialog(ManagedToplevel):
+    """Cross-doc reparent picker for local-variable handling.
+
+    Shown when the user moves widget(s) into another document and the
+    moved subtree binds at least one local variable owned by the
+    source doc. Two orthogonal radio choices:
+
+    Q1 — what happens to the variable in the source window:
+        ``"keep"``    — variable stays as-is.
+        ``"delete"``  — variable removed; cascade-unbinds any external
+                        widgets in the source still referencing it.
+
+    Q2 — how the moved widget(s) deal with the variable in the target:
+        ``"duplicate"`` — copy variable into the target doc (fresh
+                          UUID, suffix dedup; same-name + same-type
+                          reuses an existing target var).
+        ``"unbind"``    — drop the binding from the moved widget(s);
+                          the property reverts to its descriptor default.
+
+    Result is a tuple ``(source_policy, target_policy)`` on OK,
+    ``None`` on Cancel (which aborts the whole reparent).
+    """
+
+    default_size = (460, 380)
+    min_size = (440, 0)
+    fg_color = BG
+    panel_padding = (0, 0)
+    modal = True
+    window_resizable = (False, False)
+
+    def __init__(
+        self, parent,
+        source_doc_name: str,
+        target_doc_name: str,
+        var_entries: list,
+        external_usage: int,
+    ):
+        self.window_title = tr(
+            "variables.reparent.title", "Move widget(s) across windows",
+        )
+        self.result: tuple[str, str] | None = None
+        self._source_name = source_doc_name
+        self._target_name = target_doc_name
+        self._var_entries = list(var_entries)
+        self._external_usage = int(external_usage)
+        self._source_var = tk.StringVar(value="keep")
+        self._target_var = tk.StringVar(value="duplicate")
+        super().__init__(parent)
+        self.bind("<Return>", lambda _e: self._on_ok())
+
+    def default_offset(self, parent) -> tuple[int, int]:
+        try:
+            parent.update_idletasks()
+            px, py = parent.winfo_rootx(), parent.winfo_rooty()
+            pw, ph = parent.winfo_width(), parent.winfo_height()
+            w, h = self.default_size
+            return (px + (pw - w) // 2, py + (ph - h) // 2)
+        except tk.TclError:
+            return (100, 100)
+
+    def build_content(self) -> ctk.CTkFrame:
+        container = ctk.CTkFrame(self, fg_color="transparent")
+
+        outer = ctk.CTkFrame(container, fg_color=PANEL_BG, corner_radius=6)
+        outer.pack(padx=18, pady=(18, 10), fill="both", expand=True)
+
+        ctk.CTkLabel(
+            outer,
+            text=tr(
+                "variables.reparent.selection_uses",
+                "The selection uses {count} local variable{s} "
+                "from `{source}`:",
+            ).format(
+                count=len(self._var_entries),
+                s="s" if len(self._var_entries) != 1 else "",
+                source=self._source_name,
+            ),
+            font=ui_font(11),
+            text_color="#cccccc", anchor="w", justify="left",
+        ).pack(fill="x", padx=14, pady=(12, 6))
+
+        self._build_var_list(outer)
+
+        self._build_source_section(outer)
+        self._build_target_section(outer)
+
+        ctk.CTkLabel(
+            outer,
+            text=tr("variables.reparent.global_never", "Global variables are never affected."),
+            font=ui_font(10, "italic"),
+            text_color="#7da7d9", anchor="w",
+        ).pack(fill="x", padx=14, pady=(8, 12))
+
+        footer = ctk.CTkFrame(container, fg_color="transparent")
+        footer.pack(fill="x", padx=18, pady=(0, 14))
+        ctk.CTkButton(
+            footer, text=tr("variables.ok", "OK"), width=110, height=30,
+            corner_radius=4, command=self._on_ok,
+        ).pack(side="right")
+        ctk.CTkButton(
+            footer, text=tr("variables.cancel", "Cancel"), width=80, height=30,
+            corner_radius=4,
+            fg_color="#3c3c3c", hover_color="#4a4a4a",
+            command=self._on_cancel,
+        ).pack(side="right", padx=(0, 8))
+        return container
+
+    def _build_var_list(self, parent) -> None:
+        # Three visible rows max; scrollable beyond. Tk's
+        # ``Listbox(height=3)`` doesn't actually clamp the widget to
+        # 3 rows when its parent is given extra space — pack/expand
+        # rules let it grow vertically. Force the row count by
+        # wrapping in a fixed-pixel frame with ``pack_propagate(False)``
+        # so even a bigger dialog can't stretch the listbox.
+        # 3 rows × ~17px line height + 4px borders ≈ 56px.
+        ROW_HEIGHT_PX = 17
+        VISIBLE_ROWS = 3
+        WRAP_HEIGHT = ROW_HEIGHT_PX * VISIBLE_ROWS + 8
+        wrap = stk.Frame(
+            parent, bg=PANEL_BG,
+            height=WRAP_HEIGHT, highlightthickness=0,
+        )
+        wrap.pack(fill="x", padx=14, pady=(0, 10))
+        wrap.pack_propagate(False)
+
+        listbox = tk.Listbox(
+            wrap,
+            height=VISIBLE_ROWS,
+            bg=TREE_BG, fg=TREE_FG,
+            selectbackground=TREE_SELECTED_BG,
+            selectforeground="#ffffff",
+            font=ui_font(10),
+            borderwidth=0, highlightthickness=1,
+            highlightbackground=BORDER,
+            activestyle="none",
+            exportselection=False,
+        )
+        for entry in self._var_entries:
+            listbox.insert(
+                "end", f"  •  {entry.name}    ({entry.type})",
+            )
+
+        scrollbar = ctk.CTkScrollbar(
+            wrap, orientation="vertical",
+            command=listbox.yview,
+            width=10, corner_radius=4,
+            fg_color="transparent",
+            button_color="#3a3a3a",
+            button_hover_color="#4a4a4a",
+        )
+        listbox.configure(yscrollcommand=scrollbar.set)
+        listbox.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+    def _build_source_section(self, parent) -> None:
+        ctk.CTkLabel(
+            parent,
+            text=tr(
+                "variables.reparent.source_heading",
+                "In the source window — `{source}`:",
+            ).format(source=self._source_name),
+            font=ui_font(11, "bold"),
+            text_color="#cccccc", anchor="w",
+        ).pack(fill="x", padx=14, pady=(4, 4))
+        n = self._external_usage
+        keep_label = (
+            tr(
+                "variables.reparent.keep_with_usage",
+                "Keep variables  (used by {n} other widget{s})",
+            ).format(n=n, s="s" if n != 1 else "")
+            if n > 0 else tr("variables.reparent.keep", "Keep variables")
+        )
+        ctk.CTkRadioButton(
+            parent, text=keep_label,
+            variable=self._source_var, value="keep",
+            font=ui_font(11),
+        ).pack(fill="x", padx=24, pady=(0, 2), anchor="w")
+        ctk.CTkRadioButton(
+            parent, text=tr("variables.reparent.delete", "Delete variables"),
+            variable=self._source_var, value="delete",
+            font=ui_font(11),
+        ).pack(fill="x", padx=24, pady=(0, 6), anchor="w")
+
+    def _build_target_section(self, parent) -> None:
+        ctk.CTkLabel(
+            parent,
+            text=tr(
+                "variables.reparent.target_heading",
+                "In the target window — `{target}`:",
+            ).format(target=self._target_name),
+            font=ui_font(11, "bold"),
+            text_color="#cccccc", anchor="w",
+        ).pack(fill="x", padx=14, pady=(4, 4))
+        ctk.CTkRadioButton(
+            parent,
+            text=tr(
+                "variables.reparent.duplicate",
+                "Duplicate (or reuse existing same-name)",
+            ),
+            variable=self._target_var, value="duplicate",
+            font=ui_font(11),
+        ).pack(fill="x", padx=24, pady=(0, 2), anchor="w")
+        ctk.CTkRadioButton(
+            parent, text=tr("variables.reparent.unbind", "Unbind widgets from variables"),
+            variable=self._target_var, value="unbind",
+            font=ui_font(11),
+        ).pack(fill="x", padx=24, pady=(0, 6), anchor="w")
+
+    def _on_ok(self) -> None:
+        self.result = (
+            self._source_var.get(),
+            self._target_var.get(),
+        )
+        self.destroy()
+
+    def _on_cancel(self) -> None:
+        self.result = None
+        self.destroy()
+
+
+def confirm_clipboard_paste_policy(
+    parent_window, project, target_doc,
+) -> tuple[bool, tuple[str, str] | None]:
+    """Drive the cross-doc variable dialog for a clipboard paste.
+
+    Returns the same shape the drag controller uses:
+
+    ``(True, None)``         no dialog needed — same-doc paste,
+                             empty clipboard, or no local-var
+                             bindings cross the boundary. Caller
+                             should pass ``var_policy=None`` (or the
+                             default) to ``paste_from_clipboard``.
+    ``(True, (src, tgt))``   user picked source / target policies;
+                             pass them through to
+                             ``paste_from_clipboard``.
+    ``(False, None)``        user cancelled — caller must abort the
+                             whole paste.
+    """
+    if target_doc is None or not project.clipboard:
+        return True, None
+    source_id = getattr(project, "_clipboard_source_doc_id", None)
+    if source_id is None or source_id == target_doc.id:
+        return True, None
+    var_entries, external = project.collect_clipboard_local_vars(target_doc)
+    if not var_entries:
+        return True, None
+    source_doc = project.get_document(source_id)
+    source_name = source_doc.name if source_doc is not None else ""
+    dialog = ReparentVariablesDialog(
+        parent_window,
+        source_doc_name=source_name,
+        target_doc_name=target_doc.name,
+        var_entries=var_entries,
+        external_usage=external,
+    )
+    dialog.wait_window()
+    if dialog.result is None:
+        return False, None
+    return True, dialog.result
+
+
+class VariableEditDialog(ManagedToplevel):
+    """Modal Add / Edit dialog. Result is ``(name, type, default)`` on
+    OK, ``None`` on cancel.
+    """
+
+    default_size = (DIALOG_W, DIALOG_H)
+    min_size = (360, 280)
+    fg_color = BG
+    panel_padding = (0, 0)
+    modal = True
+    window_resizable = (False, False)
+
+    def __init__(
+        self, parent, title: str,
+        initial_name: str, initial_type: str, initial_default: str,
+        existing_names: set[str],
+        allowed_types: tuple[str, ...] | None = None,
+    ):
+        self.result: tuple[str, str, str] | None = None
+        self._existing_names = existing_names
+        # When the dialog is opened from a property row's "Create new
+        # variable" entry, the property's editor only accepts a
+        # restricted set of variable types (e.g. a boolean row accepts
+        # bool / int but not str / float). Filtering the Type dropdown
+        # here keeps the dialog from offering choices that would fail
+        # silently at bind time. ``None`` = no restriction (Variables
+        # window add / edit flows).
+        self._allowed_types: tuple[str, ...] | None = (
+            tuple(t for t in allowed_types if t in TYPE_LABELS)
+            if allowed_types else None
+        )
+
+        self._name_var = tk.StringVar(value=initial_name)
+        self._type_var = tk.StringVar(
+            value=TYPE_LABELS.get(initial_type, "String"),
+        )
+        self._default_var = tk.StringVar(value=initial_default)
+        self._error_var = tk.StringVar(value="")
+
+        # Track the most recent auto-filled values so a Type change
+        # only swaps Name / Default when the user hasn't customised
+        # them. Equality test against ``_last_auto_*`` is the cue.
+        self._last_auto_name = TYPE_DEFAULT_NAMES.get(initial_type, "")
+        self._last_auto_default = TYPE_DEFAULT_VALUES.get(initial_type, "")
+        self._type_var.trace_add("write", self._on_type_changed)
+
+        super().__init__(parent)
+        self.title(title)
+        self.bind("<Return>", lambda _e: self._on_ok())
+        self.after(80, lambda: self._name_entry.focus_set())
+
+    def default_offset(self, parent) -> tuple[int, int]:
+        try:
+            parent.update_idletasks()
+            px, py = parent.winfo_rootx(), parent.winfo_rooty()
+            pw, ph = parent.winfo_width(), parent.winfo_height()
+            w, h = self.default_size
+            return (px + (pw - w) // 2, py + (ph - h) // 2)
+        except tk.TclError:
+            return (100, 100)
+
+    def build_content(self) -> ctk.CTkFrame:
+        container = ctk.CTkFrame(self, fg_color="transparent")
+
+        panel = ctk.CTkFrame(
+            container, fg_color=PANEL_BG, corner_radius=BUTTON_RADIUS,
+        )
+        panel.pack(padx=18, pady=(18, 10), fill="both", expand=True)
+
+        style.styled_label(
+            panel, tr("variables.edit.heading", "Variable"),
+            font=ui_font(11, "bold"),
+            text_color=EMPTY_FG, anchor="w",
+        ).pack(fill="x", padx=14, pady=(10, 6))
+
+        self._add_field(panel, tr("variables.edit.name", "Name"), self._build_name_row)
+        self._add_field(panel, tr("variables.edit.type", "Type"), self._build_type_row)
+        self._add_field(panel, tr("variables.edit.default", "Default"), self._build_default_row)
+
+        # Error / hint line — pinned under the Default row so the user
+        # sees validation feedback without the dialog reflowing.
+        stk.Label(
+            panel,
+            textvariable=self._error_var,
+            bg=PANEL_BG, fg=DANGER_HOVER,
+            font=ui_font(9, "italic"),
+            anchor="w",
+        ).pack(fill="x", padx=(98, 14), pady=(2, 8))
+
+        footer = ctk.CTkFrame(container, fg_color="transparent")
+        footer.pack(fill="x", padx=18, pady=(0, 14))
+        style.primary_button(
+            footer, tr("variables.ok", "OK"), command=self._on_ok, width=110,
+        ).pack(side="right")
+        style.secondary_button(
+            footer, tr("variables.cancel", "Cancel"), command=self._on_cancel, width=80,
+        ).pack(side="right", padx=(0, 8))
+        return container
+
+    def _add_field(self, parent, label: str, builder) -> None:
+        row = ctk.CTkFrame(parent, fg_color="transparent")
+        row.pack(fill="x", padx=14, pady=4)
+        style.styled_label(
+            row, f"{label}:", width=80, anchor="w",
+        ).pack(side="left")
+        builder(row)
+
+    def _build_name_row(self, row) -> None:
+        self._name_entry = style.styled_entry(
+            row, textvariable=self._name_var, height=28,
+        )
+        self._name_entry.pack(side="left", fill="x", expand=True)
+
+    def _build_type_row(self, row) -> None:
+        if self._allowed_types is not None:
+            type_values = [
+                TYPE_LABELS[t] for t in self._allowed_types
+            ]
+        else:
+            type_values = list(TYPE_LABELS.values())
+        ctk.CTkOptionMenu(
+            row, values=type_values,
+            variable=self._type_var,
+            width=160, height=28, dynamic_resizing=False,
+            corner_radius=BUTTON_RADIUS,
+            fg_color=SECONDARY_BG, button_color=SECONDARY_BG,
+            button_hover_color=SECONDARY_HOVER,
+            text_color=TREE_FG,
+            dropdown_fg_color=HEADER_BG,
+            dropdown_hover_color=TREE_SELECTED_BG,
+            dropdown_text_color=TREE_FG,
+        ).pack(side="left")
+
+    def _build_default_row(self, row) -> None:
+        # The default editor surface depends on the current type. All
+        # widget sets are built up-front and packed/unpacked by
+        # ``_apply_type_to_default_row``; building lazily would mean
+        # rebuilding the row on every type swap, which flickers.
+        self._default_row = row
+        self._default_entry = style.styled_entry(
+            row, textvariable=self._default_var, height=28,
+        )
+        # Color editor: swatch label + Pick… button. The swatch is a
+        # plain ``tk.Label`` with a ``bg=hex`` so it tracks the hex
+        # value live (no PhotoImage churn per stroke).
+        self._color_frame = stk.Frame(row, bg=PANEL_BG, highlightthickness=0)
+        self._color_swatch = stk.Label(
+            self._color_frame, bg=COLOR_DEFAULT,
+            width=4, height=1,
+            relief="solid", bd=1, highlightthickness=0,
+        )
+        self._color_swatch.pack(side="left", padx=(0, 8), pady=2)
+        self._color_pick_btn = style.secondary_button(
+            self._color_frame, tr("variables.edit.pick", "Pick…"),
+            command=self._open_color_picker, width=70,
+        )
+        self._color_pick_btn.configure(height=28)
+        self._color_pick_btn.pack(side="left")
+        self._color_hex_label = stk.Label(
+            self._color_frame,
+            textvariable=self._default_var,
+            bg=PANEL_BG, fg=TREE_FG,
+            font=ui_font(10),
+        )
+        self._color_hex_label.pack(side="left", padx=(10, 0))
+        # Bool editor: CTkSwitch + state label showing "True"/"False".
+        # _default_var stays the source of truth ("True"/"False" strings)
+        # — switch command writes it; trace reflects external writes
+        # (type-swap auto-fill, manual edits) back onto the switch.
+        self._bool_frame = stk.Frame(row, bg=PANEL_BG, highlightthickness=0)
+        self._bool_switch = ctk.CTkSwitch(
+            self._bool_frame, text="",
+            command=self._on_bool_toggle,
+            width=44, height=20,
+        )
+        self._bool_switch.pack(side="left", pady=4)
+        self._bool_state_label = stk.Label(
+            self._bool_frame,
+            text=tr("variables.bool.false", "False"),
+            bg=PANEL_BG, fg=TREE_FG,
+            font=ui_font(10),
+        )
+        self._bool_state_label.pack(side="left", padx=(10, 0))
+        # Keep the swatch fill in lock-step with the hex string —
+        # picker writes the StringVar, swatch reads from the trace.
+        self._default_var.trace_add("write", self._sync_color_swatch)
+        self._default_var.trace_add("write", self._sync_bool_surface)
+        self._apply_type_to_default_row()
+
+    def _apply_type_to_default_row(self) -> None:
+        """Show the entry for str/int/float, the switch for bool, the
+        swatch+button for color. Called on build and on every type swap.
+        """
+        var_type = LABEL_TO_TYPE.get(self._type_var.get(), "str")
+        for frame in (
+            self._default_entry, self._color_frame, self._bool_frame,
+        ):
+            try:
+                frame.pack_forget()
+            except tk.TclError:
+                pass
+        if var_type == "color":
+            self._color_frame.pack(side="left", fill="x", expand=True)
+            self._sync_color_swatch()
+        elif var_type == "bool":
+            self._bool_frame.pack(side="left", fill="x", expand=True)
+            self._sync_bool_surface()
+        else:
+            self._default_entry.pack(side="left", fill="x", expand=True)
+
+    def _sync_color_swatch(self, *_args) -> None:
+        """Recolour the swatch label to match the current hex string;
+        invalid hex falls through to the safe default so the swatch
+        never raises a TclError mid-typing (not user-facing here, but
+        defensive — picker writes valid hex; future-proof against
+        callers that bypass it).
+        """
+        hex_value = self._default_var.get() or COLOR_DEFAULT
+        if not is_valid_hex(hex_value):
+            hex_value = COLOR_DEFAULT
+        try:
+            self._color_swatch.configure(bg=hex_value)
+        except tk.TclError:
+            pass
+
+    def _sync_bool_surface(self, *_args) -> None:
+        """Reflect ``_default_var`` onto the bool switch + state label.
+        Skips redundant writes so the switch's own command callback
+        (which writes the StringVar) doesn't bounce back through the
+        trace and reset the widget mid-toggle.
+        """
+        text = self._default_var.get()
+        truthy = text.strip().lower() in ("true", "1", "yes", "on")
+        try:
+            self._bool_state_label.configure(
+                text=tr("variables.bool.true", "True") if truthy
+                else tr("variables.bool.false", "False"),
+            )
+        except tk.TclError:
+            pass
+        current = bool(self._bool_switch.get())
+        if current != truthy:
+            try:
+                if truthy:
+                    self._bool_switch.select()
+                else:
+                    self._bool_switch.deselect()
+            except tk.TclError:
+                pass
+
+    def _on_bool_toggle(self) -> None:
+        new_val = "True" if self._bool_switch.get() else "False"
+        if new_val != self._default_var.get():
+            self._default_var.set(new_val)
+
+    def _open_color_picker(self) -> None:
+        """Launch the shared ``ColorPickerDialog`` seeded with the
+        current hex; on confirm, write the chosen hex back into the
+        StringVar so the swatch + tree refresh themselves via the
+        trace and the existing OK-coercion path.
+        """
+        try:
+            from app.ui.tint_color_picker import ColorPickerDialog
+        except ImportError:
+            return
+        initial = self._default_var.get() or COLOR_DEFAULT
+        dialog = ColorPickerDialog(self, initial_color=initial)
+        dialog.wait_window()
+        chosen = getattr(dialog, "result", None)
+        if chosen:
+            self._default_var.set(chosen)
+
+    def _on_type_changed(self, *_args) -> None:
+        """Swap Name / Default to the new type's auto-fill values
+        only when the user hasn't customised them. ``_last_auto_*``
+        carries the previous auto values; if a field still equals
+        them, it's safe to update — anything else is the user's text
+        and stays put.
+        """
+        new_type = LABEL_TO_TYPE.get(self._type_var.get(), "str")
+        new_auto_name = TYPE_DEFAULT_NAMES.get(new_type, "")
+        new_auto_default = TYPE_DEFAULT_VALUES.get(new_type, "")
+        if self._name_var.get() == self._last_auto_name:
+            self._name_var.set(new_auto_name)
+        if self._default_var.get() == self._last_auto_default:
+            self._default_var.set(new_auto_default)
+        self._last_auto_name = new_auto_name
+        self._last_auto_default = new_auto_default
+        self._apply_type_to_default_row()
+
+    def _on_ok(self) -> None:
+        raw_name = self._name_var.get().strip()
+        if not raw_name:
+            self._error_var.set(tr("variables.edit.error_empty", "Name cannot be empty"))
+            return
+        clean_name = sanitize_var_name(raw_name)
+        if clean_name in self._existing_names:
+            self._error_var.set(
+                tr(
+                    "variables.edit.error_exists",
+                    "A variable named '{name}' already exists",
+                ).format(name=clean_name),
+            )
+            return
+        type_label = self._type_var.get()
+        var_type = LABEL_TO_TYPE.get(type_label, "str")
+        if var_type not in VAR_TYPES:
+            var_type = "str"
+        default_raw = self._default_var.get()
+        default = coerce_default_for_type(default_raw, var_type)
+        self.result = (clean_name, var_type, default)
+        self.destroy()
+
+    def _on_cancel(self) -> None:
+        self.result = None
+        self.destroy()
+
+
+class VariablesWindow(ManagedToplevel):
+    """Floating window wrapper around two ``VariablesPanel`` instances.
+
+    Two tabs at the top — **Global** (blue, page-scoped — shared by
+    every window in the active page) and **Local** (orange,
+    per-document). The local panel is NOT tied to the workspace's
+    active window: a "Variables of window:" dropdown at the bottom
+    of the panel picks which window's locals to inspect, and the
+    choice survives canvas focus changes. Entry points that know
+    their document (chrome ⓥ button, Properties panel jumps) pass a
+    ``document_id`` to land the dropdown on the right window.
+    """
+
+    window_key = "variables"
+    default_size = (460, 440)
+    min_size = (360, 260)
+    fg_color = BG
+    # Tab strip + panel area drive their own padx/pady inside the
+    # wrapper, so suppress ManagedToplevel's outer padding.
+    panel_padding = (0, 0)
+
+    # Tab-strip colour pairs. Every token already lives elsewhere in
+    # the app: the blue pair is TREE_SELECTED_BG / PRIMARY_BG, the
+    # orange pair is the local + Add button's fg / hover. Inactive =
+    # near-black tint of the scope accent (still reads as a button),
+    # active = the calmer mid tone — not the bright chrome accent.
+    TAB_COLORS = {
+        "global": {
+            "inactive": TREE_SELECTED_BG,   # "#094771"
+            "active": style.PRIMARY_BG,     # "#0e639c"
+        },
+        "local": {
+            "inactive": "#8a541a",
+            "active": "#a0651e",
+        },
+    }
+
+    def __init__(
+        self, parent, project: "Project",
+        on_close: Callable[[], None] | None = None,
+        initial_scope: str = "global",
+        initial_variable_id: str | None = None,
+        initial_document_id: str | None = None,
+    ):
+        self.window_title = tr("variables.window_title", "Data")
+        self.project = project
+        self._active_scope = "global"
+        self._local_doc_id = self._resolve_initial_doc_id(
+            initial_document_id, initial_scope, initial_variable_id,
+        )
+        self._initial_scope = initial_scope
+        self._initial_variable_id = initial_variable_id
+        super().__init__(parent)
+        self.set_on_close(on_close)
+
+        self._show_scope(self._initial_scope)
+        if self._initial_variable_id is not None:
+            # Panels populate via after(0, _refresh) so the tree row
+            # we want to select doesn't exist yet — defer onto the
+            # same queue (FIFO → refresh first, then our select).
+            self.after(
+                0,
+                lambda v=self._initial_variable_id: self._select_variable(v),
+            )
+
+    def build_content(self) -> tk.Frame:
+        wrapper = stk.Frame(self, bg=BG, highlightthickness=0)
+        self._build_tab_strip(wrapper)
+        self._panel_area = stk.Frame(wrapper, bg=BG, highlightthickness=0)
+        self._panel_area.pack(fill="both", expand=True, padx=6, pady=(0, 6))
+
+        # Global panel — never rebuilt; always points at project.variables.
+        self._global_panel = VariablesPanel(
+            self._panel_area, self.project, scope="global",
+        )
+        # Local panel — built once; its "Window:" dropdown re-points
+        # it at other documents without a rebuild.
+        self._local_panel = VariablesPanel(
+            self._panel_area, self.project,
+            scope="local", document_id=self._local_doc_id,
+        )
+        return wrapper
+
+    def _resolve_initial_doc_id(
+        self, initial_document_id: str | None,
+        initial_scope: str, initial_variable_id: str | None,
+    ) -> str | None:
+        """Pick the document the Local tab starts on: explicit id →
+        the id's document; local variable pre-select → its owner doc;
+        otherwise the active document."""
+        if initial_document_id is not None:
+            doc = self.project.get_document(initial_document_id)
+            if doc is not None:
+                return doc.id
+        if initial_scope == "local" and initial_variable_id is not None:
+            owner = self.project.find_document_for_variable(
+                initial_variable_id,
+            )
+            if owner is not None:
+                return owner.id
+        if self.project.documents:
+            return self.project.active_document.id
+        return None
+
+    def default_offset(self, parent) -> tuple[int, int]:
+        try:
+            parent.update_idletasks()
+            px = parent.winfo_rootx()
+            py = parent.winfo_rooty()
+            pw = parent.winfo_width()
+            ph = parent.winfo_height()
+            w, h = self.default_size
+            return (px + (pw - w) // 2, py + (ph - h) // 2)
+        except tk.TclError:
+            return (100, 100)
+
+    def _select_variable(self, var_id: str) -> None:
+        """Select ``var_id`` in whichever panel currently owns it.
+        Idempotent and tolerant of an unknown / orphaned id — leaves
+        the tree's existing selection alone if the row is missing."""
+        for panel in (self._global_panel, self._local_panel):
+            if panel is None:
+                continue
+            if panel.select_variable(var_id):
+                return
+
+    # ------------------------------------------------------------------
+    # Tab strip
+    # ------------------------------------------------------------------
+    def _build_tab_strip(self, parent) -> None:
+        strip = stk.Frame(parent, bg=BG, highlightthickness=0)
+        strip.pack(fill="x", padx=6, pady=(6, 0))
+        # Two equal columns so Global / Local tabs share the window's
+        # full width.
+        for col in (0, 1):
+            strip.grid_columnconfigure(col, weight=1, uniform="tab")
+        self._global_tab = self._make_tab_button(
+            strip, tr("variables.tab.global", "Global"),
+            command=lambda: self._show_scope("global"),
+        )
+        self._global_tab.grid(row=0, column=0, sticky="ew", padx=(0, 2))
+        self._local_tab = self._make_tab_button(
+            strip, tr("variables.tab.local", "Local"),
+            command=lambda: self._show_scope("local"),
+        )
+        self._local_tab.grid(row=0, column=1, sticky="ew", padx=(2, 0))
+        self._set_tab_state(self._global_tab, "global", False)
+        self._set_tab_state(self._local_tab, "local", False)
+
+    def _make_tab_button(self, parent, text: str, command) -> ctk.CTkButton:
+        # Solid background instead of ``fg_color="transparent"`` —
+        # CTk 5.2 occasionally resolves transparent fg_color to an
+        # empty bg string in `_on_enter`, raising
+        # ``TclError: unknown color name ""``. _set_tab_state paints
+        # the real scope colours right after creation.
+        return ctk.CTkButton(
+            parent, text=text, width=10, height=28,
+            corner_radius=4, font=ui_font(11, "bold"),
+            fg_color=BG, hover_color="#2a2a2a",
+            text_color="#888888",
+            border_width=0,
+            command=command,
+        )
+
+    def _show_scope(self, scope: str) -> None:
+        if scope not in ("global", "local"):
+            scope = "global"
+        self._active_scope = scope
+        # Hide every panel first; the active branch packs its own.
+        try:
+            self._global_panel.pack_forget()
+        except tk.TclError:
+            pass
+        if self._local_panel is not None:
+            try:
+                self._local_panel.pack_forget()
+            except tk.TclError:
+                pass
+        if scope == "global":
+            self._global_panel.pack(fill="both", expand=True)
+            self.title(tr("variables.title.global", "Data — Global Variables"))
+        else:  # local
+            if self._local_panel is not None:
+                self._local_panel.pack(fill="both", expand=True)
+            self.title(tr("variables.title.local", "Data — Local Variables"))
+        self._set_tab_state(
+            self._global_tab, "global", scope == "global",
+        )
+        self._set_tab_state(
+            self._local_tab, "local", scope == "local",
+        )
+
+    def _set_tab_state(
+        self, btn: ctk.CTkButton, scope_key: str, active: bool,
+    ) -> None:
+        colors = self.TAB_COLORS[scope_key]
+        btn.configure(
+            text_color="#ffffff" if active else "#bbbbbb",
+            fg_color=colors["active"] if active else colors["inactive"],
+            # Hovering an inactive tab previews its active tone.
+            hover_color=colors["active"],
+        )
+
+    # ------------------------------------------------------------------
+    # External hooks
+    # ------------------------------------------------------------------
+    def show_scope(
+        self, scope: str, variable_id: str | None = None,
+        document_id: str | None = None,
+    ) -> None:
+        """Public switcher used by the chrome / toolbar entry points.
+        ``variable_id`` (optional) pre-selects the matching row in the
+        scope's tree — used by panel double-click to land the user on
+        the bound variable. ``document_id`` (optional) re-points the
+        local panel's dropdown; without it, a local ``variable_id``'s
+        owner document is used, and otherwise the current dropdown
+        choice stays put."""
+        if self._local_panel is not None:
+            target_doc_id = document_id
+            if target_doc_id is None and (
+                scope == "local" and variable_id is not None
+            ):
+                owner = self.project.find_document_for_variable(
+                    variable_id,
+                )
+                target_doc_id = owner.id if owner is not None else None
+            if target_doc_id is not None:
+                self._local_panel.set_document(target_doc_id)
+        self._show_scope(scope)
+        if variable_id is not None:
+            self._select_variable(variable_id)
+        try:
+            self.lift()
+            self.focus_force()
+        except tk.TclError:
+            pass
+
+    def destroy(self) -> None:
+        # Drop the window-level bus subscriptions we registered in
+        # __init__ so nothing keeps a reference to this dead Toplevel.
+        try:
+            bus = self.project.event_bus
+            for event_name, handler in getattr(self, "_bus_subs", []):
+                bus.unsubscribe(event_name, handler)
+        except Exception:
+            pass
+        # Embedded panels do their own teardown in CTkFrame.destroy(),
+        # but we call _unsubscribe_bus() defensively in case the panel
+        # is still un-packed (and so destroy hasn't propagated yet).
+        for panel in (
+            getattr(self, "_global_panel", None),
+            getattr(self, "_local_panel", None),
+        ):
+            if panel is not None:
+                try:
+                    panel._unsubscribe_bus()
+                except Exception:
+                    pass
+        super().destroy()

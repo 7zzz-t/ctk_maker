@@ -1,0 +1,254 @@
+"""Modal — import an external ``.ctkcomp`` into the project's
+``components/`` library. Shows the component's metadata (name, size,
+author, date), offers a Preview button + a target-folder picker, and
+copies the file into the chosen location on Import.
+
+On filename collision the user picks Overwrite / Rename / Cancel via
+``_confirm_collision``.
+
+Returns ``True`` from ``run()`` when the file was imported.
+"""
+
+from __future__ import annotations
+
+import shutil
+import tkinter as tk
+from pathlib import Path
+
+import customtkinter as ctk
+
+from app.core.component_paths import COMPONENT_EXT, component_display_stem
+from app.core.i18n import tr
+from app.core.logger import log_error
+from app.io.component_io import load_metadata, load_payload
+from app.ui.dialogs.message import MessageDialog, show_error, show_warning
+from app.ui.managed_window import ManagedToplevel
+from app.ui.system_fonts import ui_font
+
+
+def _format_size(num_bytes: int) -> str:
+    if num_bytes < 1024:
+        return f"{num_bytes} B"
+    kb = num_bytes / 1024
+    if kb < 1024:
+        return f"{kb:.1f} KB"
+    mb = kb / 1024
+    return f"{mb:.1f} MB"
+
+
+def _format_date(iso: str) -> str:
+    return iso[:10] if iso else ""
+
+
+def _list_folders(root: Path) -> list[str]:
+    out: list[str] = []
+    for path in root.rglob("*"):
+        if path.is_dir():
+            rel = path.relative_to(root).as_posix()
+            out.append(rel)
+    out.sort()
+    return out
+
+
+def _unique_name(target_dir: Path, base_stem: str) -> str:
+    """``base_stem_2``, ``base_stem_3``, … until the resulting filename
+    doesn't exist in ``target_dir``. Used by the Rename branch of the
+    collision dialog.
+    """
+    n = 2
+    while True:
+        candidate = f"{base_stem}_{n}{COMPONENT_EXT}"
+        if not (target_dir / candidate).exists():
+            return candidate
+        n += 1
+
+
+class ComponentImportDialog(ManagedToplevel):
+    default_size = (400, 320)
+    min_size = (380, 300)
+    panel_padding = (0, 0)
+    modal = True
+    window_resizable = (False, False)
+
+    def __init__(
+        self,
+        parent,
+        source_path: Path,
+        components_dir: Path,
+    ):
+        self.window_title = tr("comp_import.title", "Import component")
+        self.result: bool = False
+        self._source_path = source_path
+        self._components_dir = components_dir
+        self._payload = load_payload(source_path)
+        self._meta = load_metadata(source_path) or {}
+        try:
+            self._file_bytes = source_path.stat().st_size
+        except OSError:
+            self._file_bytes = 0
+        self._root_label = tr("comp_import.root_label", "(root)")
+        self._folder_var = tk.StringVar(master=parent, value=self._root_label)
+        self._folders = [self._root_label] + _list_folders(components_dir)
+        super().__init__(parent)
+
+    def default_offset(self, parent) -> tuple[int, int]:
+        try:
+            parent.update_idletasks()
+            px = parent.winfo_rootx()
+            py = parent.winfo_rooty()
+            pw = parent.winfo_width()
+            ph = parent.winfo_height()
+            w, h = self.default_size
+            return (
+                max(0, px + (pw - w) // 2),
+                max(0, py + (ph - h) // 2),
+            )
+        except tk.TclError:
+            return (100, 100)
+
+    def build_content(self) -> ctk.CTkFrame:
+        container = ctk.CTkFrame(self, fg_color="transparent")
+        meta = self._meta
+
+        body = ctk.CTkFrame(container, fg_color="transparent")
+        body.pack(padx=20, pady=(18, 6), fill="x")
+
+        ctk.CTkLabel(
+            body,
+            text=meta.get("name") or component_display_stem(self._source_path),
+            font=ui_font(14, "bold"),
+            text_color="#e6e6e6", anchor="w",
+        ).grid(row=0, column=0, sticky="w")
+
+        author = meta.get("author", "") or ""
+        date_part = _format_date(meta.get("created_at", ""))
+        info_parts = [
+            f"{meta.get('view_w', 0)} × {meta.get('view_h', 0)}",
+            _format_size(self._file_bytes),
+        ]
+        if author:
+            info_parts.append(
+                tr("comp_import.by_author", "by {author}").format(author=author),
+            )
+        if date_part:
+            info_parts.append(date_part)
+        ctk.CTkLabel(
+            body,
+            text="  ·  ".join(info_parts),
+            font=ui_font(9),
+            text_color="#888888", anchor="w",
+        ).grid(row=1, column=0, sticky="w", pady=(0, 12))
+
+        ctk.CTkButton(
+            body, text=tr("comp_import.preview", "Preview"), width=100, height=28,
+            corner_radius=4,
+            fg_color="#3c3c3c", hover_color="#4a4a4a",
+            command=self._on_preview,
+        ).grid(row=2, column=0, sticky="w", pady=(0, 12))
+
+        ctk.CTkLabel(
+            body, text=tr("comp_import.import_to", "Import to"), font=ui_font(10),
+        ).grid(row=3, column=0, sticky="w", pady=(0, 4))
+        ctk.CTkOptionMenu(
+            body, values=self._folders, variable=self._folder_var, width=320,
+        ).grid(row=4, column=0, sticky="ew", pady=(0, 12))
+
+        body.grid_columnconfigure(0, weight=1)
+
+        footer = ctk.CTkFrame(container, fg_color="transparent")
+        footer.pack(fill="x", padx=20, pady=(4, 16))
+        ctk.CTkButton(
+            footer, text=tr("comp_import.import", "Import"), width=120, height=32,
+            corner_radius=4, command=self._on_import,
+        ).pack(side="right")
+        ctk.CTkButton(
+            footer, text=tr("comp_import.cancel", "Cancel"), width=90, height=32,
+            corner_radius=4,
+            fg_color="#3c3c3c", hover_color="#4a4a4a",
+            command=self._on_cancel,
+        ).pack(side="right", padx=(0, 8))
+        return container
+
+    def _on_preview(self) -> None:
+        if self._payload is None:
+            show_warning(
+                tr("comp_import.preview_unavailable_title", "Preview unavailable"),
+                tr("comp_import.preview_unavailable_msg", "This file isn't a valid component."),
+                parent=self,
+            )
+            return
+        from app.ui.component_preview_window import ComponentPreviewWindow
+        ComponentPreviewWindow(self, self._payload, self._source_path)
+
+    def _on_import(self) -> None:
+        if self._payload is None:
+            show_error(
+                tr("comp_import.invalid_title", "Invalid component"),
+                tr("comp_import.invalid_msg", "This file isn't a readable .ctkcomp."),
+                parent=self,
+            )
+            return
+        folder_label = self._folder_var.get()
+        if folder_label == self._root_label:
+            target_dir = self._components_dir
+        else:
+            target_dir = self._components_dir / folder_label
+        target_dir.mkdir(parents=True, exist_ok=True)
+
+        # Normalise to the local extension on import — the source
+        # file may carry the Hub-upload .ctkcomp.zip suffix from the
+        # community library, but the local library uses plain
+        # .ctkcomp so files stay short inside the user's project.
+        local_stem = component_display_stem(self._source_path)
+        target_name = f"{local_stem}{COMPONENT_EXT}"
+        target_path = target_dir / target_name
+        if target_path.exists():
+            action = self._confirm_collision()
+            if action == "cancel":
+                return
+            if action == "rename":
+                target_name = _unique_name(target_dir, local_stem)
+                target_path = target_dir / target_name
+            # "overwrite" → keep target_path as-is; shutil.copy2 will
+            # replace it.
+        try:
+            shutil.copy2(self._source_path, target_path)
+        except OSError as exc:
+            show_error(
+                tr("comp_import.import_failed_title", "Import failed"),
+                tr(
+                    "comp_import.import_failed_msg",
+                    "Couldn't copy:\n{source}\n→\n{target}\n\n{error}",
+                ).format(source=self._source_path, target=target_path, error=exc),
+                parent=self,
+            )
+            log_error(f"component import {target_path}")
+            return
+        self.result = True
+        self.destroy()
+
+    def _confirm_collision(self) -> str:
+        """Three-button collision dialog on ``MessageDialog``. Returns
+        ``"overwrite"`` / ``"rename"`` / ``"cancel"`` (Escape / X →
+        ``"cancel"``).
+        """
+        dialog = MessageDialog(
+            self, tr("comp_import.collision_title", "Already exists"),
+            tr(
+                "comp_import.collision_msg",
+                "'{name}' already exists in this folder. Pick how to resolve:",
+            ).format(name=self._source_path.name),
+            buttons=(
+                (tr("comp_import.btn_cancel", "Cancel"), "cancel", "ghost"),
+                (tr("comp_import.btn_rename", "Rename"), "rename", "ghost"),
+                (tr("comp_import.btn_overwrite", "Overwrite"), "overwrite", "danger"),
+            ),
+            cancel_value="cancel",
+            severity="warning",
+        )
+        dialog.wait_window()
+        return str(dialog.result)
+
+    def _on_cancel(self) -> None:
+        self.result = False
+        self.destroy()

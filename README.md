@@ -1,0 +1,126 @@
+# CTkMaker
+
+Drag-and-drop visual designer for **[CustomTkinter](https://github.com/TomSchimansky/CustomTkinter)** — design Python GUIs without writing layout code by hand.
+
+> **This is the internationalized (i18n) fork of CTkMaker 1.66.0.** It adds
+> UI language switching between **English** and **简体中文 (Simplified Chinese)** —
+> pick a language in **Settings → Language**; the whole UI (menus, palette,
+> dialogs, Properties panel groups/labels) switches live.
+>
+> - Upstream: [kandelucky/ctk_maker](https://github.com/kandelucky/ctk_maker)
+> - Codebase = upstream 1.66.0 + a self-contained `app/core/i18n.py` layer
+>   (JSON packs in `app/assets/locales/{en,zh}.json`) — **no behaviour or
+>   export-format changes**: projects saved here open in the upstream editor
+>   and vice-versa.
+> - License stays **MIT** © Lasha Kandelaki (see `LICENSE`).
+
+**Community Hub:** [kandelucky.github.io/ctkmaker-hub](https://kandelucky.github.io/ctkmaker-hub/) — browse and share reusable components built in CTkMaker.
+
+> **What changed since v1.62.0:**
+> - **v1.66.0** — **Editor picker** — Settings → Editor picks an editor by name (VS Code / Cursor / Sublime / PyCharm / Notepad++ / IDLE); CTkMaker resolves the binary and the jump-to-line flags.
+> - **v1.65.0** — **DPI-true dialogs** — raw-tk dialog content now scales with CTk's DPI factor on 125/150% displays via the new `stk` layer.
+> - **v1.64.0** — **scripts/ in the assets tree** — the project's script files are browsable right inside the editor.
+> - **v1.63.0** — **Smarter New-script dialog** — any name style normalizes to PascalCase, with a live class/file preview and a duplicate-class guard.
+> - **v1.62.0** — **Unified dark dialogs** — every message/confirm dialog uses one dark hero-line style, DPI-aware and clamped on-screen (v1.62.1).
+>
+> ⚠️ **Tested on Windows only.** macOS and Linux are not verified — see [issue #5](https://github.com/kandelucky/ctk_maker/issues/5) for the running list of known incompatibilities + how to help.
+
+[![CTkMaker canvas](docs/screenshots/canvas.png)](docs/screenshots/canvas.png)
+
+## Project structure
+
+A CTkMaker project is organised in four levels:
+
+- **Project** — a folder containing one or more page files plus a shared asset pool
+- **Page** — a single `.ctkproj` design (Login, Dashboard, Settings, ...) — pages share the project's fonts / images / icons
+- **Window** — a Tk window inside a page; either the **Main Window** (one per page) or a **Dialog Window** (zero or more)
+- **Widget** — buttons, labels, frames, etc. nested inside a window
+
+## What it does
+
+- **Visual canvas** — real CTk widgets on a zoomable workspace. What you see is what you get. Multiple windows (main + dialogs) live on the same canvas in one page.
+- **Widgets — 22 in the palette:** Button, Segmented Button, Label, Rich Label, Image, Card, Progress Bar, Circular Progress, Check Box, Radio Button, Switch, Entry, Textbox, Combo Box, Option Menu, Slider, Frame, Scrollable Frame, Tab View, Vertical Layout, Horizontal Layout, Grid Layout. Richer property editing than raw CTk: drag-scrub numbers, paired font family + size, multiline overlays, segmented value editor, scrollable dropdown for ComboBox / OptionMenu, color swatches with eyedropper. Open **Tools → Inspect CTk Widget** to see every property side-by-side — native CTk parameters vs builder-added helpers.
+- **Layout managers** — `place`, `vbox`, `hbox`, `grid` rendered with the actual Tk pack/grid managers. Drop into cells, drag to reparent, even across windows. Horizontal / Vertical containers flex-shrink their children to a content-min floor (CSS-flex semantics): `fixed` siblings keep their nominal size, `fill` siblings let the user pin the main axis while the cross axis auto-fills, `grow` siblings auto-distribute the remaining space and shrink down to text + icon + chrome padding before clipping.
+- **Alignment & distribution** — toolbar buttons to align widgets (Left / Center / Right + Top / Middle / Bottom) and distribute them evenly. Auto-detects intent: a single widget aligns to its container, multiple widgets align to each other.
+- **Marquee selection + smart snap guides** — drag a rectangle on empty canvas to multi-select; while dragging a widget, cyan guide lines snap its edges / centre to siblings and to the container. Hold Alt to bypass.
+- **Groups** — Ctrl+G binds a same-parent selection together; clicking any member targets the whole group, fast follow-up drills to a single member, drag always carries the group as one. Object Tree shows them as a virtual `◆ Group (n)` parent with members nested in soft orange. Ctrl+Shift+G dissolves the group.
+- **Variables + property bindings (two-level)** — declare shared values once and bind them to widget properties from the Properties panel with one click. **Global** variables (blue) live on the page — visible to every window inside it (main + dialogs); **Local** variables (orange) live on a single window and stay invisible to widgets in other windows. Updates propagate live across every bound widget. Reparenting or pasting a widget across windows triggers a migration dialog so local bindings are preserved cleanly. Exported code keeps globals on the main window and locals on each class — no glue code to wire up.
+- **Scripting (CTkScript, Unity-style)** — attach a `CTkScript` subclass to any widget or window and bind widget events to its public methods from the Properties panel's **Events** group. Scripts are plain Python files in a top-level `scripts/` folder you own — bindings live in the `.ctkproj`, CTkMaker never writes into your code. The typed base class gives editor autocomplete out of the box; declared `tk.Variable` fields surface in the panel for inline values or linking to project variables; `on_start` / `on_close` lifecycle hooks. Settings → Editor routes Edit / double-click into VS Code, Cursor, PyCharm, Notepad++, or IDLE.
+- **Widget descriptions (AI bridge)** — every widget has a free-form description field for plain-language intent ("when clicked, add the digit 1 to the display"). Export optionally emits descriptions as Python comments above each widget — paste the file into your favourite AI to have it fill in the missing logic.
+- **Asset system** — fonts, images, and 1700+ Lucide icons managed inside the project folder. Tinted PNGs, system-font auto-import, portable references.
+- **Component library** — save any selection on the canvas as a reusable component (`.ctkcomp` zip), browse them in the Palette's Components tab, then drag back onto any canvas to instantiate with fresh UUIDs. Real-time search filter, single-widget components show their type icon, multi-widget fragments fall back to a generic icon. Lives under `<project>/components/` so the library travels with the project. Variable bindings inside a component get bundled with the file — on insert, name conflicts surface a Rename / Skip dialog. Whole windows can be saved too (drop spawns a fresh Toplevel). Sharing goes through the [Community Hub](https://kandelucky.github.io/ctkmaker-hub/) via a Publish flow gated by MIT license + form (Author / Category / Description).
+- **Live preview** — run any window as a real CTk app in one click; floating **Screenshot · F12** button saves the client area as PNG to share.
+- **Clean code export** — one runnable Python file per window. Optional `.zip` bundle (Python code + assets) for sharing. Per-page export ships only the assets that page actually references.
+
+## Screenshots
+
+[![Startup screen](docs/screenshots/startup.png)](docs/screenshots/startup.png)
+
+*Startup — recent projects on the left, new-project form on the right with device + screen-size presets.*
+
+## Quick start
+
+> ⚠️ **Runtime dependency — `ctkmaker-core` (a CustomTkinter fork).** This build
+> runs on **ctkmaker-core ≥ 5.5.1**, a `customtkinter` fork that is **not published
+> under that name on PyPI**. Install it from its own checkout first:
+
+```bash
+# 1) install the customtkinter fork this build needs
+git clone <your-ctkmaker-core-repo>
+pip install ./ctkmaker-core            # provides the `customtkinter` package
+
+# 2) then run this editor
+git clone <this-repo>
+cd <repo-dir>
+pip install -r requirements.txt
+python main.py
+```
+
+Switch the UI language any time in **Settings → Language** (English / 简体中文).
+Switching back and forth is live — no restart required.
+
+## Documentation
+
+Full docs live in the [Wiki](https://github.com/kandelucky/ctk_maker/wiki):
+
+- **Tutorial — [Name Badge](https://github.com/kandelucky/ctk_maker/wiki/Tutorial-1-Name-Badge)** — hands-on first build: a live app with no code, using Variables + Bindings
+- [User Guide](https://github.com/kandelucky/ctk_maker/wiki/User-Guide) — workflow walkthrough
+- [Widgets](https://github.com/kandelucky/ctk_maker/wiki/Widgets) — every supported widget + properties
+- [Keyboard Shortcuts](https://github.com/kandelucky/ctk_maker/wiki/Keyboard-Shortcuts) — full reference
+- [Version history](docs/history/) — screenshots and notes from each release
+
+## Community Hub
+
+[**kandelucky.github.io/ctkmaker-hub**](https://kandelucky.github.io/ctkmaker-hub/) is the
+community library where reusable components built in CTkMaker get shared. Browse cards
+by category (forms, buttons, mini-apps, …), click to preview, download the `.ctkcomp.zip`,
+drop it into your own project.
+
+To share one of your own — click **Publish to Community** in the builder, sign the MIT
+agreement, post the file in the [Components Discussion](https://github.com/kandelucky/ctk_maker/discussions/new?category=components).
+A sync workflow picks it up within ~30 minutes and your card appears on the site.
+
+## Reporting issues
+
+Found a bug or have an idea? Use **Help → Report a Bug** (or the toolbar button on the right) — a guided form opens that submits straight to the GitHub issue tracker, or saves a markdown file you can email instead. You can also [open an issue directly](https://github.com/kandelucky/ctk_maker/issues).
+
+## Tech stack
+
+- **Python 3.12+** (tested on 3.14)
+- **ctkmaker-core** 5.4.20+ — maintained [CustomTkinter fork](https://github.com/kandelucky/ctkmaker-core)
+- **Pillow**, **tkextrafont**, **Send2Trash**
+
+## What's next
+
+- Custom user widgets + plugin system
+- Distribution: PyInstaller bundles, installers, auto-updater
+- macOS / Linux verification + cross-platform polish
+- Component Hub growth — categories, search, version history
+
+## Support
+
+If CTkMaker helps you, [buy me a coffee ☕](https://buymeacoffee.com/Kandelucky_dev).
+
+## License
+
+MIT

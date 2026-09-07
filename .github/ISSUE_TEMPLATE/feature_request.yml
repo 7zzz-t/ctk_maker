@@ -1,0 +1,30 @@
+name: Feature request
+description: Suggest an idea for CTkMaker
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for suggesting a feature. Please describe it below.
+
+        Before you submit, please take a moment to [browse the open issues](https://github.com/kandelucky/ctk_maker/issues) to see whether someone has already requested this — it saves us both some time. **Tip:** Ctrl/Cmd+Click the link to open it in a new tab so you don't lose your progress here.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem it solves
+      description: What user pain or limitation does this feature address?
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: How would you like it to work?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Any other approaches you have thought about?

@@ -1,0 +1,830 @@
+"""Widget lifecycle controller — turns model events into canvas
+actions.
+
+Every ``widget_added`` / ``widget_removed`` / ``widget_reparented``
+/ ``widget_z_changed`` / ``widget_visibility_changed`` /
+``widget_locked_changed`` event on the project bus lands here.
+The controller owns the creation side of the pipeline (descriptor
+→ real tk widget → canvas placement with the right geometry
+manager) plus the destruction + reparent replay that tkinter
+forces on us (a widget can't change its master after creation).
+
+Split out of the old monolithic ``core.py`` so widget-lifecycle
+logic lives in one focused module. ``Workspace`` holds a single
+instance on ``self.lifecycle`` and re-exposes a couple of methods
+for the property-change path that still wants to recreate a
+subtree in place.
+"""
+
+from __future__ import annotations
+
+import tkinter as tk
+
+from app.ui.workspace.layout_overlay import (
+    _child_manager_kwargs,
+    _composite_configure,
+    _composite_place_size,
+    _strip_layout_keys,
+)
+from app.widgets.layout_schema import (
+    normalise_layout_type,
+    resolve_grid_drop_cell,
+)
+from app.widgets.registry import get_descriptor
+
+
+class WidgetLifecycle:
+    """Per-workspace widget add / remove / reparent / z-order /
+    visibility handler. All external state (project, canvas, zoom,
+    selection, layout overlay, widget_views) is read through the
+    workspace ref; the controller holds no state of its own.
+    """
+
+    def __init__(self, workspace) -> None:
+        self.workspace = workspace
+
+    # ------------------------------------------------------------------
+    # Convenience accessors
+    # ------------------------------------------------------------------
+    @property
+    def canvas(self) -> tk.Canvas:
+        return self.workspace.canvas
+
+    @property
+    def project(self):
+        return self.workspace.project
+
+    @property
+    def zoom(self):
+        return self.workspace.zoom
+
+    @property
+    def selection(self):
+        return self.workspace.selection
+
+    @property
+    def layout_overlay(self):
+        return self.workspace.layout_overlay
+
+    @property
+    def widget_views(self) -> dict:
+        return self.workspace.widget_views
+
+    @property
+    def anchor_views(self) -> dict:
+        return self.workspace._anchor_views
+
+    # ------------------------------------------------------------------
+    # Event bus subscriptions
+    # ------------------------------------------------------------------
+    def subscribe(self, bus) -> None:
+        bus.subscribe("widget_added", self.on_widget_added)
+        bus.subscribe("widget_removed", self.on_widget_removed)
+        bus.subscribe("widget_reparented", self.on_widget_reparented)
+        bus.subscribe("widget_z_changed", self.on_widget_z_changed)
+        bus.subscribe(
+            "widget_visibility_changed", self.on_widget_visibility_changed,
+        )
+        bus.subscribe(
+            "widget_locked_changed", self.on_widget_locked_changed,
+        )
+        bus.subscribe(
+            "document_collapsed_changed",
+            self.on_document_collapsed_changed,
+        )
+
+    # ------------------------------------------------------------------
+    # Widget creation
+    # ------------------------------------------------------------------
+    def _auto_assign_grid_cell(self, parent_node, node) -> None:
+        """Route every new child's grid placement through
+        ``resolve_grid_drop_cell`` — the single source of truth for
+        "pick a free cell, grow the grid if full" semantics. If the
+        caller set an explicit ``grid_row`` / ``grid_column`` (e.g.
+        palette drop under the cursor, paste with saved cell), that
+        preferred cell is honoured unless another sibling already
+        claims it; collisions bump the child to the next free cell
+        or grow the grid by one row / column when every cell is
+        taken.
+        """
+        if parent_node is None:
+            return
+        if normalise_layout_type(
+            parent_node.properties.get("layout_type", "place"),
+        ) != "grid":
+            return
+        props = node.properties
+        try:
+            preferred_row = int(props.get("grid_row", 0) or 0)
+            preferred_col = int(props.get("grid_column", 0) or 0)
+        except (TypeError, ValueError):
+            preferred_row = preferred_col = 0
+        row, col, dim_updates = resolve_grid_drop_cell(
+            [s for s in parent_node.children if s is not node],
+            parent_node.properties,
+            preferred_row=preferred_row,
+            preferred_col=preferred_col,
+            exclude_node=node,
+        )
+        props["grid_row"] = row
+        props["grid_column"] = col
+        if dim_updates:
+            # Grid grew — push the new dimensions through the bus so
+            # the Inspector readout + rearrange_container_children
+            # both pick them up. Capture before-values and stash on
+            # the node so the outer caller (palette / drop path) can
+            # bundle them into the AddWidgetCommand — otherwise undo
+            # removes the widget but leaves the parent expanded.
+            parent_before = {
+                k: parent_node.properties.get(k) for k in dim_updates
+            }
+            for key, val in dim_updates.items():
+                self.project.update_property(parent_node.id, key, val)
+            node._pending_parent_dim_changes = (
+                parent_node.id,
+                {
+                    k: (parent_before[k], dim_updates[k])
+                    for k in dim_updates
+                },
+            )
+
+    def apply_fill_defaults_to_children(self, container_node) -> None:
+        """Re-apply fill defaults to every child of ``container_node``.
+        Called from the layout_type swap path so fill-friendly widgets
+        inherit the new manager's default (``stretch="grow"`` for
+        vbox / hbox, ``grid_sticky="nsew"`` for grid) without the user
+        editing each child individually. Direct dict assignment — no
+        history push — so the layout swap itself remains a single
+        undo entry; the property readout will re-surface on next
+        Inspector rebuild.
+        """
+        for child in container_node.children:
+            descriptor = get_descriptor(child.widget_type)
+            if descriptor is None:
+                continue
+            self._apply_fill_default(descriptor, container_node, child)
+
+    def _refresh_derived_on_add(self, descriptor, node) -> None:
+        # Property-change triggers (workspace.core._apply_derived_props)
+        # only fire on edits — load/paste/undo restore widgets directly
+        # from a snapshot, so a stale derived value (e.g. font_size on
+        # a Label saved with font_autofit=true but a hand-edited size)
+        # would render until the user retoggles the trigger. Run
+        # compute_derived once before instantiation so the widget is
+        # built with the up-to-date value. Mutating node.properties
+        # in place (no event, no command) keeps undo history clean.
+        if not hasattr(descriptor, "compute_derived"):
+            return
+        try:
+            derived = descriptor.compute_derived(node.properties)
+        except Exception:
+            return
+        for k, v in (derived or {}).items():
+            if node.properties.get(k) != v:
+                node.properties[k] = v
+
+    def _apply_fill_default(self, descriptor, parent_node, node) -> None:
+        """Fresh drops of fill-friendly widgets (Button / Label / Entry
+        / Frame / …) into a layout container commit ``stretch="fill"``
+        (vbox / hbox) or ``grid_sticky="nsew"`` (grid) instead of the
+        schema default so form-shaped UIs land edge-to-edge without a
+        manual Inspector tweak. Only applies when the node hasn't
+        already carried the layout key in from its snapshot — paste /
+        duplicate / undo-redo preserve the source's intent. Widgets
+        with natural sizing (CheckBox, Switch, OptionMenu) leave
+        ``prefers_fill_in_layout`` at False and are unaffected.
+        """
+        if not getattr(descriptor, "prefers_fill_in_layout", False):
+            return
+        parent_layout = normalise_layout_type(
+            parent_node.properties.get("layout_type", "place"),
+        )
+        if parent_layout in ("vbox", "hbox"):
+            if "stretch" not in node.properties:
+                node.properties["stretch"] = "grow"
+        elif parent_layout == "grid":
+            if "grid_sticky" not in node.properties:
+                node.properties["grid_sticky"] = "nsew"
+
+    def on_widget_added(self, node) -> None:
+        ws = self.workspace
+        descriptor = get_descriptor(node.widget_type)
+        if descriptor is None:
+            return
+        # Collapsed docs are unrendered — skip widget instantiation.
+        # Lazy-build runs from on_document_collapsed_changed when the
+        # user expands the doc again. Ghosted docs are rendered as a
+        # static screenshot image; their widgets are also skipped.
+        owning_doc = self.project.find_document_for_widget(node.id)
+        if owning_doc is not None and (
+            owning_doc.collapsed or owning_doc.ghosted
+        ):
+            return
+        parent_node = node.parent
+        master = self._resolve_master(parent_node, node)
+        if parent_node is not None:
+            self._apply_fill_default(descriptor, parent_node, node)
+            self._auto_assign_grid_cell(parent_node, node)
+        self._refresh_derived_on_add(descriptor, node)
+        widget, anchor_widget = self._instantiate_widget(
+            descriptor, node, master,
+        )
+        self._disable_container_propagate(
+            widget, anchor_widget, descriptor,
+        )
+        try:
+            lx = int(node.properties.get("x", 0))
+            ly = int(node.properties.get("y", 0))
+        except (TypeError, ValueError):
+            lx = ly = 0
+        try:
+            lw = int(node.properties.get("width", 0) or 0)
+            lh = int(node.properties.get("height", 0) or 0)
+        except (TypeError, ValueError):
+            lw = lh = 0
+        is_composite = anchor_widget is not widget
+        if parent_node is None:
+            window_id = self._place_top_level(
+                anchor_widget, owning_doc, lx, ly, lw, lh, is_composite,
+            )
+        else:
+            self._place_nested(
+                anchor_widget, parent_node, node,
+                lx, ly, lw, lh, is_composite,
+            )
+            window_id = None
+        # Pass the owning document so apply_to_widget lands the
+        # canvas coords against the *correct* form's offset — not the
+        # currently-active one, which for a cross-doc drag is still
+        # the source document.
+        self.zoom.apply_to_widget(
+            widget, window_id, node.properties, document=owning_doc,
+        )
+        if node.widget_type == "Image":
+            self.zoom._scale_image_for_zoom(widget, node.properties)
+        # Grid children: place AFTER apply_to_widget using the same
+        # path as drag-reassigns, so fresh drops and manual moves go
+        # through identical code.
+        if parent_node is not None and normalise_layout_type(
+            parent_node.properties.get("layout_type", "place"),
+        ) == "grid":
+            self.layout_overlay.apply_child_manager(
+                anchor_widget, parent_node, node,
+            )
+        self.widget_views[node.id] = (widget, window_id)
+        ws._bind_widget_events(anchor_widget, node.id)
+        if node.widget_type == "CTkTabview":
+            self._wire_tabview_selection_refresh(widget)
+        if not node.visible:
+            self._set_widget_visibility(widget, window_id, node, False)
+        # CTkScrollableFrame with place layout: pin the inner frame's
+        # size so place'd children render. Two trigger points — when
+        # the scrollable itself is added (initial pin to its own dims)
+        # and when a place'd child is added (recompute bbox).
+        if node.widget_type == "CTkScrollableFrame":
+            self._pin_scrollable_inner_for_place(node)
+        if (
+            parent_node is not None
+            and parent_node.widget_type == "CTkScrollableFrame"
+        ):
+            self._pin_scrollable_inner_for_place(parent_node)
+        # v1.10.2 flex-shrink: a fresh pack child appended to an
+        # hbox/vbox container shifts the budget for every existing
+        # sibling AND the new one. Run *after* widget_views is
+        # populated so the new node is visible to rebalance — calling
+        # earlier (inside _place_nested) skipped it because its
+        # widget_views entry didn't exist yet.
+        if parent_node is not None:
+            parent_layout = normalise_layout_type(
+                parent_node.properties.get("layout_type", "place"),
+            )
+            if parent_layout in ("vbox", "hbox"):
+                self.layout_overlay.rebalance_pack_siblings(
+                    parent_node, parent_layout,
+                )
+
+    def _wire_tabview_selection_refresh(self, tabview) -> None:
+        """Route CTk's tab-switch callback to the selection controller
+        so chrome around a child widget in the just-hidden tab doesn't
+        stay stamped on the canvas. The callback fires AFTER CTk
+        re-grids the new tab, so `winfo_ismapped` readings in
+        `_bbox_for` are settled by the time we redraw.
+        """
+        def _on_tab_switched(*_a, **_kw) -> None:
+            self.workspace.after_idle(self.selection.draw)
+        tabview._command = _on_tab_switched
+
+    # ------------------------------------------------------------------
+    # on_widget_added helpers
+    # ------------------------------------------------------------------
+    def _resolve_master(self, parent_node, child_node=None) -> tk.Widget:
+        """Return the tk master for a new widget under ``parent_node``.
+        Top-level widgets live directly on the canvas; nested widgets
+        live inside their parent's tk widget. Falls back to the canvas
+        when a parent exists in the model but its view hasn't been
+        created yet (e.g. mid-reparent). For composite parents whose
+        children live inside a named sub-widget (CTkTabview), the
+        descriptor's ``child_master`` hook maps to the real host
+        (``tabview.tab(slot)``).
+        """
+        if parent_node is None:
+            return self.canvas
+        parent_entry = self.widget_views.get(parent_node.id)
+        if parent_entry is None:
+            return self.canvas
+        master, _ = parent_entry
+        if child_node is not None:
+            parent_descriptor = get_descriptor(parent_node.widget_type)
+            if parent_descriptor is not None:
+                master = parent_descriptor.child_master(master, child_node)
+        return master
+
+    def _instantiate_widget(
+        self, descriptor, node, master,
+    ) -> tuple:
+        """Build the tk / CTk widget via ``descriptor`` and return
+        ``(widget, anchor_widget)``. The anchor differs from the widget
+        for composite descriptors (CTkScrollableFrame's inner canvas,
+        CTkTabview's button bar parent, etc.) where events + canvas
+        placement target the outer container, not the inner widget.
+        """
+        from app.core.variables import resolve_bindings
+        ws = self.workspace
+        init_kwargs = ws._get_radio_init_kwargs(node) or {}
+        # Phase 1 binding: walk the property dict for ``var:<uuid>``
+        # tokens. Strip wired ones (CTk's ``textvariable`` /
+        # ``variable``) and pass the live ``tk.Variable`` via init
+        # kwargs so the runtime widget tracks the shared value.
+        clean_props = _strip_layout_keys(node.properties)
+        clean_props, var_kwargs = resolve_bindings(
+            ws.project, node.widget_type, clean_props,
+        )
+        if var_kwargs:
+            init_kwargs = {**init_kwargs, **var_kwargs}
+        widget = descriptor.create_widget(
+            master, clean_props,
+            init_kwargs=init_kwargs or None,
+        )
+        ws._sync_radio_initial(widget, node)
+        anchor_widget = descriptor.canvas_anchor(widget)
+        if anchor_widget is not widget:
+            self.anchor_views[node.id] = anchor_widget
+        return widget, anchor_widget
+
+    def _disable_container_propagate(
+        self, widget, anchor_widget, descriptor,
+    ) -> None:
+        """Pin container size — tk's default ``propagate(True)`` would
+        shrink a Frame to fit its children the moment a vbox/hbox
+        child is packed into it, hiding the Frame's outline and
+        breaking drop-into UX. Disabled on every container; ``place``
+        children don't trigger propagate anyway so non-pack modes
+        are unaffected.
+
+        For composite containers (CTkScrollableFrame), only the OUTER
+        anchor widget is pinned — the INNER frame must keep
+        propagate(True) so it grows with packed children, which is
+        what drives CTk's ``<Configure>``-bound scrollregion update.
+        Disabling propagate on the inner frame would leave children
+        packed but clipped to the frame's initial 0-height natural
+        size (invisible on canvas while still in the model).
+        """
+        if not getattr(descriptor, "is_container", False):
+            return
+        targets = (
+            {anchor_widget} if widget is not anchor_widget
+            else {widget}
+        )
+        for forget_target in targets:
+            # CTkScrollableFrame overrides pack_propagate /
+            # grid_propagate to take no argument (the inner canvas
+            # it wraps can't honour "don't shrink to content"), so
+            # the call raises TypeError instead of tk.TclError.
+            # Catch both so a composite container doesn't crash the
+            # whole on_widget_added pipeline on load.
+            try:
+                forget_target.pack_propagate(False)
+            except (tk.TclError, TypeError):
+                pass
+            try:
+                forget_target.grid_propagate(False)
+            except (tk.TclError, TypeError):
+                pass
+
+    def _pin_scrollable_inner_for_place(self, scrollable_node) -> None:
+        """When a CTkScrollableFrame uses place layout, the inner
+        ``tk.Frame`` (the one that hosts user widgets inside the
+        canvas viewport) needs explicit sizing — place children
+        don't fire the ``<Configure>``-driven auto-grow that
+        ``vbox`` / ``hbox`` / ``grid`` rely on, so without a manual
+        size the inner frame stays 0×0 and place'd children render
+        outside the visible canvas window (looks like the children
+        vanished).
+
+        Computes the inner frame size as
+        ``max(scrollable's own w/h, bbox of all place'd children)``
+        and configures the inner frame; the frame's own
+        ``<Configure>`` binding then updates ``scrollregion`` so
+        the scrollbar reflects the content. Inner frame propagate
+        is pinned False so a subsequent place doesn't shrink it.
+        """
+        if scrollable_node.widget_type != "CTkScrollableFrame":
+            return
+        if scrollable_node.properties.get("layout_type") != "place":
+            return
+        entry = self.widget_views.get(scrollable_node.id)
+        if entry is None:
+            return
+        inner_widget, _ = entry
+
+        try:
+            max_w = int(scrollable_node.properties.get("width", 0) or 0)
+            max_h = int(scrollable_node.properties.get("height", 0) or 0)
+        except (TypeError, ValueError):
+            max_w = max_h = 0
+        for child in scrollable_node.children:
+            try:
+                cx = int(child.properties.get("x", 0) or 0)
+                cy = int(child.properties.get("y", 0) or 0)
+                cw = int(child.properties.get("width", 0) or 0)
+                ch = int(child.properties.get("height", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+            if cx + cw > max_w:
+                max_w = cx + cw
+            if cy + ch > max_h:
+                max_h = cy + ch
+
+        if max_w <= 0 or max_h <= 0:
+            return
+
+        try:
+            inner_widget.pack_propagate(False)
+        except (tk.TclError, TypeError):
+            pass
+        try:
+            inner_widget.grid_propagate(False)
+        except (tk.TclError, TypeError):
+            pass
+        # CTkScrollableFrame.configure(width=, height=) is overridden
+        # to resize the OUTER viewport canvas, not the inner tk.Frame
+        # we actually want to grow. Bypass the override by calling
+        # tk.Frame.configure directly so the inner frame's reqsize
+        # updates — which fires <Configure> on the frame and bumps
+        # the parent canvas's scrollregion via CTk's own bind.
+        #
+        # CTk applies its own widget-scaling (DPI awareness) to the
+        # outer viewport canvas, so on a 1.5×-scaled display a
+        # nominally 340-tall viewport is actually ~510 pixels. The
+        # inner tk.Frame is a raw tk widget though — it doesn't
+        # inherit that scaling, so an unscaled `height=426` would
+        # leave the content shorter than the scaled viewport and
+        # scrolling never activates. Apply CTk's scaling here so the
+        # inner frame's reqsize is in the same pixel space as the
+        # canvas it's drawn on.
+        try:
+            scale = inner_widget._get_widget_scaling()
+        except (AttributeError, tk.TclError):
+            scale = 1.0
+        zoom = self.zoom.value
+        try:
+            tk.Frame.configure(
+                inner_widget,
+                width=max(1, int(max_w * zoom * scale)),
+                height=max(1, int(max_h * zoom * scale)),
+            )
+        except tk.TclError:
+            pass
+
+    def _place_top_level(
+        self, anchor_widget, owning_doc,
+        lx: int, ly: int, lw: int, lh: int, is_composite: bool,
+    ) -> int:
+        """Canvas.create_window for a top-level widget. The owning
+        doc's ``canvas_x`` / ``canvas_y`` offset feeds into
+        ``logical_to_canvas`` so a second document at ``canvas_x=900``
+        lands its widgets at ``(pad + 900*zoom + x*zoom)`` — not the
+        active form's offset.
+        """
+        cx, cy = self.zoom.logical_to_canvas(
+            lx, ly, document=owning_doc,
+        )
+        kwargs = {"anchor": "nw", "window": anchor_widget}
+        # Composite widgets (CTkScrollableFrame) don't propagate their
+        # requested size to the canvas; pin the canvas item size
+        # explicitly so the outer container doesn't grow. Use
+        # ``canvas_scale`` (= user_zoom × DPI) so the canvas item
+        # matches CTk's DPI-scaled widget sizing — otherwise on
+        # DPI-aware Windows a ScrollableFrame stored at 200 renders
+        # at ~135 physical pixels while a plain Frame stored at 200
+        # renders at ~300 physical pixels.
+        if is_composite:
+            kwargs.update(
+                _composite_place_size(lw, lh, self.zoom.canvas_scale),
+            )
+        return self.canvas.create_window(cx, cy, **kwargs)
+
+    def _place_nested(
+        self, anchor_widget, parent_node, node,
+        lx: int, ly: int, lw: int, lh: int, is_composite: bool,
+    ) -> None:
+        """Pack / place a nested child under its parent. The geometry
+        manager depends on the parent's ``layout_type``: ``place``
+        keeps absolute x/y, ``vbox`` / ``hbox`` switch to real
+        ``.pack()`` so canvas preview matches exported runtime, and
+        ``grid`` is placement-deferred — ``apply_child_manager``
+        handles it post-``apply_to_widget`` so fresh drops and manual
+        moves share the same code path.
+        """
+        manager, mgr_kwargs = _child_manager_kwargs(
+            parent_node, node.properties, zoom=self.zoom.value,
+        )
+        if manager == "pack":
+            # Composite widgets don't auto-size — reserve the
+            # configured dimensions so pack has something to work with.
+            if is_composite:
+                _composite_configure(
+                    anchor_widget, lw, lh, self.zoom.value,
+                )
+            anchor_widget.pack(**mgr_kwargs)
+            # v1.10.2 flex-shrink rebalance is deferred to
+            # ``on_widget_added`` *after* widget_views is populated —
+            # rebalancing here would skip the freshly packed widget
+            # because its widget_views entry doesn't exist yet.
+        elif manager == "grid":
+            # Placement deferred — see the apply_child_manager block
+            # in ``on_widget_added`` that runs after apply_to_widget.
+            # Leaving the widget unplaced here avoids place_configure
+            # overriding the grid placement we're about to apply.
+            return
+        else:
+            place_kwargs: dict = {
+                "x": int(lx * self.zoom.value),
+                "y": int(ly * self.zoom.value),
+            }
+            if is_composite:
+                place_kwargs.update(
+                    _composite_place_size(lw, lh, self.zoom.value),
+                )
+            anchor_widget.place(**place_kwargs)
+
+    def create_widget_subtree(self, node) -> None:
+        self.on_widget_added(node)
+        for child in node.children:
+            self.create_widget_subtree(child)
+
+    # ------------------------------------------------------------------
+    # Widget destruction
+    # ------------------------------------------------------------------
+    def destroy_widget_subtree(self, node) -> None:
+        for child in list(node.children):
+            self.destroy_widget_subtree(child)
+        entry = self.widget_views.pop(node.id, None)
+        if entry is None:
+            return
+        widget, window_id = entry
+        if window_id is not None:
+            try:
+                self.canvas.delete(window_id)
+            except tk.TclError:
+                pass
+        try:
+            widget.destroy()
+        except tk.TclError:
+            pass
+
+    def on_widget_removed(
+        self, widget_id: str, parent_id: str | None = None,
+    ) -> None:
+        if widget_id not in self.widget_views:
+            return
+        widget, window_id = self.widget_views.pop(widget_id)
+        self.workspace._unbind_radio_group(widget_id)
+        anchor = self.anchor_views.pop(widget_id, None)
+        if window_id is not None:
+            try:
+                self.canvas.delete(window_id)
+            except tk.TclError:
+                pass
+        try:
+            (anchor or widget).destroy()
+        except tk.TclError:
+            pass
+        # Recompute the inner frame size if the removed widget lived
+        # inside a CTkScrollableFrame using place layout — the bbox
+        # may have shrunk and scrollregion needs to follow.
+        if parent_id:
+            parent_node = self.project.get_widget(parent_id)
+            if parent_node is not None:
+                if parent_node.widget_type == "CTkScrollableFrame":
+                    self._pin_scrollable_inner_for_place(parent_node)
+                # v1.10.2 flex-shrink: removing a child from an
+                # hbox/vbox container frees budget for the remaining
+                # grow siblings — re-distribute so they grow back.
+                parent_layout = normalise_layout_type(
+                    parent_node.properties.get("layout_type", "place"),
+                )
+                if parent_layout in ("vbox", "hbox"):
+                    self.layout_overlay.rebalance_pack_siblings(
+                        parent_node, parent_layout,
+                    )
+
+    # ------------------------------------------------------------------
+    # Reparent + z-order
+    # ------------------------------------------------------------------
+    def on_widget_reparented(
+        self, widget_id: str,
+        _old_parent_id: str | None, _new_parent_id: str | None,
+    ) -> None:
+        """When a widget's parent changes, destroy its widget view
+        subtree and recreate it under the new parent.
+
+        Tkinter doesn't let a widget change its master after creation,
+        so reparenting means destroying the CTk/tk widget(s) and
+        rebuilding them inside the new master. A selected widget's
+        Properties panel needs to refresh too — the Layout rows it
+        shows depend on the parent's ``layout_type``, which just
+        changed — so we re-publish ``selection_changed`` to force a
+        panel rebuild.
+        """
+        node = self.project.get_widget(widget_id)
+        if node is None:
+            return
+        was_selected = self.project.selected_id == widget_id
+        if was_selected:
+            self.selection.clear()
+        self.destroy_widget_subtree(node)
+        self.create_widget_subtree(node)
+        if was_selected:
+            self.project.event_bus.publish(
+                "selection_changed", widget_id,
+            )
+            self.workspace.after(20, self.selection.draw)
+
+    def on_widget_z_changed(
+        self, widget_id: str, direction: str,
+    ) -> None:
+        """Restack the reordered widget's siblings in project order.
+
+        Using `widget.lower()` directly on a nested child would push it
+        behind CTkFrame's internal drawing canvas and hide it forever.
+        Instead we re-`lift()` every sibling from bottom to top so the
+        stacking order matches `parent.children`, leaving CTk internals
+        below everything we control.
+
+        For vbox / hbox / grid parents, z-order alone doesn't move the
+        children — pack/grid ordering is decided at ``.pack()`` time.
+        So we also rearrange the parent's children so the new model
+        sequence drives the new visual sequence.
+        """
+        _ = direction  # reserved for future per-direction hooks
+        node = self.project.get_widget(widget_id)
+        if node is None:
+            return
+        siblings = (
+            node.parent.children if node.parent is not None
+            else self.project.root_widgets
+        )
+        for sibling in siblings:
+            entry = self.widget_views.get(sibling.id)
+            if entry is None:
+                continue
+            try:
+                entry[0].lift()
+            except tk.TclError:
+                pass
+        if node.parent is not None:
+            parent_layout = normalise_layout_type(
+                node.parent.properties.get("layout_type", "place"),
+            )
+            if parent_layout != "place":
+                self.layout_overlay.rearrange_container_children(
+                    node.parent.id,
+                )
+        if widget_id == self.project.selected_id:
+            self.workspace._schedule_selection_redraw()
+
+    # ------------------------------------------------------------------
+    # Document collapse / expand
+    # ------------------------------------------------------------------
+    def on_document_collapsed_changed(
+        self, doc_id: str, collapsed: bool,
+    ) -> None:
+        """Lazy build / teardown for a doc's widget views. Collapse
+        destroys every CTk widget the doc owns (so the canvas pays
+        zero render cost while it's hidden); expand walks the saved
+        widget tree and reinstantiates each subtree under the canvas.
+
+        ``on_widget_added`` already short-circuits for collapsed docs,
+        so the create path here is the *only* moment a collapsed
+        doc's widgets reach the canvas.
+        """
+        doc = self.project.get_document(doc_id)
+        if doc is None:
+            return
+        if doc.ghosted:
+            # Ghosted docs have no live widgets — their on-canvas
+            # presence is the screenshot item owned by the ghost
+            # manager. Peel it on collapse (the cached PIL survives
+            # on the doc), re-place it from cache on expand.
+            gm = self.workspace.ghost_manager
+            if collapsed:
+                gm.purge(doc_id)
+            else:
+                gm.freeze_from_cache(doc)
+            return
+        if collapsed:
+            for node in list(doc.root_widgets):
+                self.destroy_widget_subtree(node)
+        else:
+            for node in list(doc.root_widgets):
+                self.create_widget_subtree(node)
+
+    # ------------------------------------------------------------------
+    # Visibility + lock
+    # ------------------------------------------------------------------
+    def on_widget_locked_changed(
+        self, _widget_id: str, _locked: bool,
+    ) -> None:
+        # Locked state affects whether selection handles render;
+        # redraw if this or an ancestor change touched the selection.
+        if self.project.selected_id is not None:
+            self.selection.draw()
+
+    def on_widget_visibility_changed(
+        self, widget_id: str, visible: bool,
+    ) -> None:
+        entry = self.widget_views.get(widget_id)
+        if entry is None:
+            return
+        widget, window_id = entry
+        node = self.project.get_widget(widget_id)
+        if node is None:
+            return
+        self._set_widget_visibility(widget, window_id, node, visible)
+        if widget_id == self.project.selected_id:
+            if visible:
+                self.workspace._schedule_selection_redraw()
+            else:
+                self.selection.clear()
+
+    def _set_widget_visibility(
+        self, widget, window_id, node, visible: bool,
+    ) -> None:
+        """Show or hide a widget without destroying it. Canvas
+        children toggle via ``canvas.itemconfigure(state=…)``; nested
+        children use the same geometry manager their parent dictates
+        (place / pack / grid). Earlier this path blindly called
+        ``widget.place(x, y)`` on unhide — grid children landed at
+        cell (0, 0) because their real placement key is
+        ``grid_row``/``grid_column``, not ``x/y``.
+        """
+        if window_id is not None:
+            try:
+                self.canvas.itemconfigure(
+                    window_id, state="normal" if visible else "hidden",
+                )
+            except tk.TclError:
+                pass
+            return
+        # Nested child — operate on the anchor widget if composite.
+        anchor_widget = self.anchor_views.get(node.id, widget)
+        if not visible:
+            # Unknown which manager is active (pack/grid/place) —
+            # forget all three so every path is covered.
+            for forget in ("place_forget", "pack_forget", "grid_forget"):
+                try:
+                    getattr(anchor_widget, forget)()
+                except tk.TclError:
+                    pass
+            return
+        # Re-establish placement under the parent's layout. Same
+        # dispatch as on_widget_added so grid / pack / place all
+        # flow through one codepath.
+        parent_node = node.parent
+        if parent_node is None:
+            return
+        try:
+            lx = int(node.properties.get("x", 0))
+            ly = int(node.properties.get("y", 0))
+        except (TypeError, ValueError):
+            lx = ly = 0
+        try:
+            lw = int(node.properties.get("width", 0) or 0)
+            lh = int(node.properties.get("height", 0) or 0)
+        except (TypeError, ValueError):
+            lw = lh = 0
+        is_composite = anchor_widget is not widget
+        self._place_nested(
+            anchor_widget, parent_node, node,
+            lx, ly, lw, lh, is_composite,
+        )
+        # Grid parents defer placement to apply_child_manager — run
+        # it now so the child lands in its saved grid_row / column
+        # instead of the (0, 0) fallback.
+        if normalise_layout_type(
+            parent_node.properties.get("layout_type", "place"),
+        ) == "grid":
+            self.layout_overlay.apply_child_manager(
+                anchor_widget, parent_node, node,
+            )

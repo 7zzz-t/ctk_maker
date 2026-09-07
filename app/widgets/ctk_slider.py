@@ -1,0 +1,259 @@
+﻿"""CTkSlider widget descriptor.
+
+A draggable value picker over a numeric range. Supports continuous
+and stepped modes plus horizontal / vertical orientation. Matches
+CTkProgressBar's approach — ``orientation`` is init-only, so flipping
+it in the Inspector destroys + recreates the widget via
+``recreate_triggers`` + ``on_prop_recreate`` (the latter swaps
+width ↔ height so a 200×16 horizontal slider becomes a 16×200
+vertical one).
+
+Groups shown in the Properties panel, in order
+(Content → Layout → Visual → Behavior):
+
+    Value Range        — min, max, number of steps, initial value
+    Geometry           — x/y, width/height
+    Orientation        — horizontal / vertical
+    Rectangle          — track corner radius, button corner radius,
+                         button length (pill-shaped when > 0),
+                         optional border
+    Main Colors        — track, progress, button, button hover
+    Button Interaction — interactable + hover effect
+"""
+import customtkinter as ctk
+
+from app.core.logger import log_error
+from app.widgets.base import WidgetDescriptor
+
+
+class CTkSliderDescriptor(WidgetDescriptor):
+    type_name = "CTkSlider"
+    display_name = "Slider"
+    prefers_fill_in_layout = True
+
+    default_properties = {
+        # Geometry
+        "x": 120,
+        "y": 120,
+        "width": 200,
+        "height": 16,
+        # Rectangle
+        "corner_radius": 8,
+        "button_corner_radius": 8,
+        "button_length": 1,
+        "border_enabled": False,
+        "border_width": 6,
+        "border_color": "#565b5e",
+        # Value range
+        "from_": 0,
+        "to": 100,
+        "number_of_steps": 0,
+        "initial_value": 50,
+        # Orientation
+        "orientation": "horizontal",
+        # Button Interaction
+        "button_enabled": True,
+        "hover": True,
+        # Main colors
+        "fg_color": "#4a4d50",
+        "fg_color_disabled": None,
+        "progress_color": "#aab0b5",
+        "progress_color_disabled": None,
+        "button_color": "#6366f1",
+        "button_color_disabled": None,
+        "button_hover_color": "#4f46e5",
+    }
+
+    property_schema = [
+        # --- Value Range -------------------------------------------------
+        {"name": "from_", "type": "number", "label": "",
+         "group": "Value Range", "row_label": "Min"},
+        {"name": "to", "type": "number", "label": "",
+         "group": "Value Range", "row_label": "Max"},
+        {"name": "number_of_steps", "type": "number", "label": "",
+         "group": "Value Range", "row_label": "Steps",
+         "min": 0, "max": 1000},
+        {"name": "initial_value", "type": "number", "label": "",
+         "group": "Value Range", "row_label": "Initial Value"},
+
+        # --- Geometry ----------------------------------------------------
+        {"name": "x", "type": "number", "label": "X",
+         "group": "Geometry", "pair": "pos", "row_label": "Position"},
+        {"name": "y", "type": "number", "label": "Y",
+         "group": "Geometry", "pair": "pos"},
+
+        # Min depends on orientation: the "long axis" (length) needs a
+        # bigger minimum than the "short axis" (thickness). For a
+        # horizontal slider width=length and height=thickness; flipping
+        # to vertical swaps both the dimensions (via on_prop_recreate)
+        # AND the role of each property, so the schema constraint has
+        # to follow.
+        {"name": "width", "type": "number", "label": "W",
+         "group": "Geometry", "pair": "size", "row_label": "Size",
+         "min": lambda p: 20 if p.get("orientation") == "horizontal" else 8,
+         "max": 2000},
+        {"name": "height", "type": "number", "label": "H",
+         "group": "Geometry", "pair": "size",
+         "min": lambda p: 8 if p.get("orientation") == "horizontal" else 20,
+         "max": 2000},
+
+        # --- Orientation -------------------------------------------------
+        {"name": "orientation", "type": "orientation", "label": "",
+         "group": "Orientation", "row_label": "Orientation"},
+
+        # --- Rectangle ---------------------------------------------------
+        {"name": "corner_radius", "type": "number", "label": "",
+         "group": "Rectangle",
+         "row_label": "Track Radius", "min": 1, "max": 50},
+        {"name": "button_corner_radius", "type": "number", "label": "",
+         "group": "Rectangle",
+         "row_label": "Button Radius", "min": 1, "max": 50},
+        # Button length caps at half the slider's long axis. For a
+        # horizontal slider that's width; for a vertical slider it's
+        # height (since on_prop_recreate swaps dimensions on flip).
+        {"name": "button_length", "type": "number", "label": "",
+         "group": "Rectangle",
+         "row_label": "Button Length", "min": 1,
+         "max": lambda p: max(
+             1,
+             int(
+                 p.get("width", 200)
+                 if p.get("orientation") == "horizontal"
+                 else p.get("height", 200)
+             ) // 2,
+         )},
+        {"name": "border_enabled", "type": "boolean", "label": "",
+         "group": "Rectangle", "subgroup": "Border",
+         "row_label": "Enabled"},
+        {"name": "border_width", "type": "number", "label": "",
+         "group": "Rectangle", "subgroup": "Border",
+         "row_label": "Thickness", "min": 1, "max": 20,
+         "disabled_when": lambda p: not p.get("border_enabled")},
+        {"name": "border_color", "type": "color", "label": "",
+         "group": "Rectangle", "subgroup": "Border",
+         "row_label": "Color",
+         "disabled_when": lambda p: not p.get("border_enabled")},
+
+        # --- Main Colors -------------------------------------------------
+        {"name": "fg_color", "type": "color", "label": "",
+         "group": "Main Colors", "row_label": "Track"},
+        {"name": "fg_color_disabled", "type": "color", "label": "",
+         "group": "Main Colors", "row_label": "Disabled Track",
+         "clearable": True},
+        {"name": "progress_color", "type": "color", "label": "",
+         "group": "Main Colors", "row_label": "Progress"},
+        {"name": "progress_color_disabled", "type": "color", "label": "",
+         "group": "Main Colors", "row_label": "Disabled Progress",
+         "clearable": True},
+        {"name": "button_color", "type": "color", "label": "",
+         "group": "Main Colors", "row_label": "Button"},
+        {"name": "button_color_disabled", "type": "color", "label": "",
+         "group": "Main Colors", "row_label": "Disabled Button",
+         "clearable": True},
+        {"name": "button_hover_color", "type": "color", "label": "",
+         "group": "Main Colors", "row_label": "Button Hover",
+         "disabled_when": lambda p: not p.get("hover")},
+
+        # --- Button Interaction ------------------------------------------
+        {"name": "button_enabled", "type": "boolean", "label": "",
+         "group": "Button Interaction", "row_label": "Interactable"},
+        {"name": "hover", "type": "boolean", "label": "",
+         "group": "Button Interaction", "row_label": "Hover Effect"},
+    ]
+
+    _NODE_ONLY_KEYS = {
+        "x", "y", "border_enabled", "initial_value", "button_enabled",
+    }
+    init_only_keys = {"orientation"}
+    recreate_triggers = frozenset({"orientation"})
+
+    @classmethod
+    def transform_properties(cls, properties: dict) -> dict:
+        result = {
+            k: v for k, v in properties.items()
+            if k not in cls._NODE_ONLY_KEYS
+            and k not in cls.init_only_keys
+        }
+        enabled = bool(properties.get("button_enabled", True))
+        result["state"] = "normal" if enabled else "disabled"
+        # Disabled-state colours → CTk's *_disabled kwargs (fork >= 5.4.6).
+        # The schema props flow through the comprehension above; normalise
+        # here so a cleared colour becomes None → the fork auto-derives a
+        # dimmed shade from the enabled colour, an explicit colour is used
+        # verbatim. Replaces the old hardcoded _DISABLED_* palette. The
+        # fork also gates hover while disabled, so the old
+        # button_hover_color sync is no longer needed.
+        def _active(c):
+            return c if c and c != "transparent" else None
+        result["fg_color_disabled"] = _active(properties.get("fg_color_disabled"))
+        result["progress_color_disabled"] = _active(properties.get("progress_color_disabled"))
+        result["button_color_disabled"] = _active(properties.get("button_color_disabled"))
+        if not properties.get("border_enabled"):
+            result["border_width"] = 0
+        # Steps = 0 means "continuous" — pass None so CTk treats it
+        # as unlimited steps.
+        if int(properties.get("number_of_steps") or 0) <= 0:
+            result["number_of_steps"] = None
+        return result
+
+    @classmethod
+    def create_widget(cls, master, properties: dict, init_kwargs=None):
+        # Init-only kwargs are filtered out of transform_properties so
+        # configure() never sees them — reinject them here.
+        kwargs = cls.transform_properties(properties)
+        for key in cls.init_only_keys:
+            if key in properties:
+                kwargs[key] = properties[key]
+        if init_kwargs:
+            kwargs.update(init_kwargs)
+        widget = ctk.CTkSlider(master, **kwargs)
+        cls.apply_state(widget, properties)
+        return widget
+
+    @classmethod
+    def on_prop_recreate(cls, prop_name: str, properties: dict) -> dict:
+        # Flipping orientation swaps the widget's dimensions so a 200×16
+        # horizontal slider becomes a 16×200 vertical slider.
+        if prop_name != "orientation":
+            return {}
+        try:
+            w = int(properties.get("width", 200) or 200)
+            h = int(properties.get("height", 16) or 16)
+        except (TypeError, ValueError):
+            return {}
+        return {"width": h, "height": w}
+
+    @classmethod
+    def apply_state(cls, widget, properties: dict) -> None:
+        value = properties.get("initial_value")
+        if value is None:
+            return
+        try:
+            widget.set(float(value))
+        except (TypeError, ValueError):
+            log_error("CTkSliderDescriptor.apply_state set")
+
+    @classmethod
+    def export_kwarg_overrides(cls, properties: dict) -> dict:
+        overrides: dict = {}
+        # CTkSlider crashes with ZeroDivisionError when the user drags
+        # it if `number_of_steps=0` is passed; the runtime replaces 0
+        # with None in `transform_properties`, the exporter now does
+        # the same so the generated code doesn't inherit the bug.
+        try:
+            steps = int(properties.get("number_of_steps") or 0)
+        except (TypeError, ValueError):
+            steps = 0
+        if steps <= 0:
+            overrides["number_of_steps"] = None
+        return overrides
+
+    @classmethod
+    def export_state(cls, var_name: str, properties: dict) -> list[str]:
+        value = properties.get("initial_value")
+        if value is None:
+            return []
+        try:
+            return [f"{var_name}.set({float(value)!r})"]
+        except (TypeError, ValueError):
+            return []

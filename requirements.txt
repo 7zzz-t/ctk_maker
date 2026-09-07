@@ -1,0 +1,3 @@
+ctkmaker-core>=5.5.1
+Pillow>=10.0.0
+Send2Trash>=1.8.0

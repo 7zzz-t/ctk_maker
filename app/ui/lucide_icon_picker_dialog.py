@@ -1,0 +1,638 @@
+"""Lucide icon picker dialog.
+
+Browse and pick a Lucide icon from the bundled set (~1700 icons,
+42 categories). Tints with a chosen hex color and writes the
+result PNG to a target directory the caller specifies.
+
+Returns ``self.result`` — absolute path of the saved tinted PNG, or
+``None`` on Cancel.
+
+Used by:
+    - Image picker dialog ("+ Lucide icon..." button)
+    - Project window + menu ("Lucide Icon..." entry)
+"""
+
+from __future__ import annotations
+
+import json
+import tkinter as tk
+from pathlib import Path
+
+import customtkinter as ctk
+
+import app.ui.stk as stk
+from PIL import Image, ImageTk
+
+from app.core.i18n import tr
+from app.ui import style
+from app.ui.dialogs.message import show_error
+from app.ui.managed_window import ManagedToplevel
+from app.ui.system_fonts import ui_font
+
+LUCIDE_DIR = Path(__file__).resolve().parent.parent / "assets" / "lucide"
+PNG_DIR = LUCIDE_DIR / "png-icons"
+CATS_FILE = LUCIDE_DIR / "categories.json"
+
+BG = style.BG
+PANEL_BG = style.PANEL_BG
+HEADER_BG = style.HEADER_BG
+HEADER_FG = style.TREE_FG
+DIM_FG = "#888888"  # local — slightly lighter than style.EMPTY_FG
+ROW_SELECTED = style.TREE_SELECTED_BG
+GRID_BG = "#1a1a1a"  # local — deeper bg for icon grid contrast
+GRID_HOVER = style.TOOLBAR_BG
+GRID_SELECTED = style.TREE_SELECTED_BG
+
+DIALOG_W = 760
+DIALOG_H = 580
+SIDEBAR_W = 180
+PREVIEW_W = 200
+THUMB = 28
+PREVIEW_SIZE = 64
+GRID_COLS = 6
+# Hard cap so "All" / a vague search doesn't try to render 1700
+# Tk widgets at once. Beyond this, the user is told to refine.
+MAX_ICONS = 400
+
+DEFAULT_TINT = "#ffffff"
+SIZE_OPTIONS = (24, 32, 48, 64, 96, 128)
+DEFAULT_OUTPUT_SIZE = 64
+
+
+class LucideIconPickerDialog(ManagedToplevel):
+    """Pick a Lucide icon, tint it, save to ``target_dir``.
+
+    Caller passes ``target_dir`` — absolute path where the tinted
+    PNG should be written (e.g. ``<project>/assets/images/`` or a
+    user-selected subfolder). On Apply, the tinted icon is saved
+    as ``<target_dir>/<icon-name>.png`` and the path is exposed via
+    ``self.result``.
+    """
+
+    _meta_cache: dict | None = None
+
+    window_title = "Lucide icons"
+    default_size = (DIALOG_W, DIALOG_H)
+    min_size = (DIALOG_W, DIALOG_H)
+    fg_color = BG
+    panel_padding = (0, 0)
+    modal = True
+    window_resizable = (False, False)
+
+    def __init__(self, parent, target_dir: Path | str) -> None:
+        self.target_dir = Path(target_dir)
+        self.result: str | None = None
+
+        self._meta = self._load_meta()
+        self._categories: dict[str, dict] = self._meta.get("categories", {})
+        self._icons_meta: dict[str, dict] = self._meta.get("icons", {})
+
+        self._tint = DEFAULT_TINT
+        self._output_size = DEFAULT_OUTPUT_SIZE
+        self._search = ""
+        # Open on the first sorted category instead of "All" — "All"
+        # renders ~400 cells at once which is slow and unnecessary
+        # given the sidebar + search are right there.
+        sorted_cats = sorted(self._categories.keys())
+        self._active_cat: str = sorted_cats[0] if sorted_cats else "_all"
+        self._selected: str | None = None
+        self._thumb_cache: dict[tuple[str, str, int], tk.PhotoImage] = {}
+        self._cat_buttons: dict[str, tk.Frame] = {}
+        self._grid_cells: dict[str, tk.Frame] = {}
+
+        self.window_title = tr("icon_picker.title", "Lucide icons")
+        super().__init__(parent)
+        self.bind("<Return>", lambda _e: self._on_apply())
+        # Defer first paint until the scrollable frames are realised —
+        # tk's CTkScrollableFrame leaves children unmapped if you push
+        # them in before the canvas has been packed.
+        self.after_idle(self._populate_categories)
+        self.after_idle(self._refresh_grid)
+
+    def default_offset(self, parent) -> tuple[int, int]:
+        try:
+            parent.update_idletasks()
+            px, py = parent.winfo_rootx(), parent.winfo_rooty()
+            pw, ph = parent.winfo_width(), parent.winfo_height()
+            w, h = self.default_size
+            return (
+                max(0, px + (pw - w) // 2),
+                max(0, py + (ph - h) // 2),
+            )
+        except tk.TclError:
+            return (100, 100)
+
+    # ------------------------------------------------------------------
+    # Meta loading
+    # ------------------------------------------------------------------
+    @classmethod
+    def _load_meta(cls) -> dict:
+        if cls._meta_cache is None:
+            try:
+                cls._meta_cache = json.loads(
+                    CATS_FILE.read_text(encoding="utf-8")
+                )
+            except (OSError, json.JSONDecodeError):
+                cls._meta_cache = {"categories": {}, "icons": {}}
+        return cls._meta_cache
+
+    # ------------------------------------------------------------------
+    # Layout
+    # ------------------------------------------------------------------
+    def build_content(self) -> ctk.CTkFrame:
+        container = ctk.CTkFrame(self, fg_color="transparent")
+        self._build_header(container)
+        body = stk.Frame(container, bg=BG)
+        body.pack(fill="both", expand=True, padx=8, pady=(4, 4))
+        self._build_sidebar(body)
+        self._build_grid(body)
+        self._build_preview(body)
+        self._build_footer(container)
+        return container
+
+    def _build_header(self, parent) -> None:
+        bar = stk.Frame(parent, bg=HEADER_BG)
+        bar.pack(fill="x")
+
+        stk.Label(
+            bar, text=tr("icon_picker.search_label", "Search:"),
+            bg=HEADER_BG, fg=HEADER_FG,
+            font=ui_font(10),
+        ).pack(side="left", padx=(12, 6), pady=8)
+
+        self._search_var = tk.StringVar()
+        self._search_var.trace_add(
+            "write", lambda *_: self._on_search_change(),
+        )
+        style.styled_entry(
+            bar, textvariable=self._search_var, width=240, height=28,
+            placeholder_text=tr("icon_picker.search_placeholder", "filter by name or tag..."),
+        ).pack(side="left", padx=(0, 8), pady=6)
+
+        self._count_lbl = stk.Label(
+            bar, text="", bg=HEADER_BG, fg=DIM_FG, font=ui_font(10),
+        )
+        self._count_lbl.pack(side="left", padx=(8, 0), pady=8)
+
+    def _build_sidebar(self, parent: tk.Misc) -> None:
+        wrap = stk.Frame(parent, bg=PANEL_BG, width=SIDEBAR_W)
+        wrap.pack(side="left", fill="y", padx=(0, 6))
+        wrap.pack_propagate(False)
+
+        self._cat_scroll = ctk.CTkScrollableFrame(
+            wrap, fg_color=PANEL_BG, corner_radius=0,
+            width=SIDEBAR_W - 16,
+        )
+        self._cat_scroll.pack(fill="both", expand=True, padx=4, pady=4)
+
+    def _build_grid(self, parent: tk.Misc) -> None:
+        self._grid_scroll = ctk.CTkScrollableFrame(
+            parent, fg_color=GRID_BG, corner_radius=0,
+        )
+        self._grid_scroll.pack(side="left", fill="both", expand=True)
+        for c in range(GRID_COLS):
+            self._grid_scroll.grid_columnconfigure(
+                c, weight=1, uniform="cells",
+            )
+
+    def _build_preview(self, parent: tk.Misc) -> None:
+        wrap = stk.Frame(parent, bg=PANEL_BG, width=PREVIEW_W)
+        wrap.pack(side="left", fill="y", padx=(6, 0))
+        wrap.pack_propagate(False)
+
+        self._preview_lbl = stk.Label(
+            wrap, bg=PANEL_BG, width=PREVIEW_SIZE, height=PREVIEW_SIZE,
+        )
+        self._preview_lbl.pack(pady=(20, 8))
+
+        self._name_lbl = stk.Label(
+            wrap, text=tr("icon_picker.no_selection", "(no selection)"),
+            bg=PANEL_BG, fg=HEADER_FG,
+            font=ui_font(11, "bold"),
+            wraplength=PREVIEW_W - 16,
+        )
+        self._name_lbl.pack(pady=(0, 4))
+
+        self._tags_lbl = stk.Label(
+            wrap, text="", bg=PANEL_BG, fg=DIM_FG,
+            font=ui_font(9), wraplength=PREVIEW_W - 16,
+            justify="center",
+        )
+        self._tags_lbl.pack(pady=(0, 12))
+
+        tint_row = stk.Frame(wrap, bg=PANEL_BG)
+        tint_row.pack(pady=(8, 0))
+        stk.Label(
+            tint_row, text=tr("icon_picker.tint_label", "Tint:"),
+            bg=PANEL_BG, fg=HEADER_FG,
+            font=ui_font(10),
+        ).pack(side="left", padx=(0, 4))
+        self._tint_entry = style.styled_entry(
+            tint_row, width=80, height=26,
+        )
+        self._tint_entry.insert(0, self._tint)
+        # ``return "break"`` so Enter inside the entry only commits
+        # the tint — without it, the toplevel <Return> binding (Apply)
+        # would also fire and close the dialog.
+        self._tint_entry.bind(
+            "<Return>", lambda _e: (self._on_tint_commit(), "break")[1],
+        )
+        self._tint_entry.bind(
+            "<FocusOut>", lambda _e: self._on_tint_commit(),
+        )
+        self._tint_entry.pack(side="left")
+
+        self._swatch = stk.Frame(
+            tint_row, bg=self._tint, width=24, height=24,
+            cursor="hand2", relief="solid", bd=1,
+        )
+        self._swatch.pack(side="left", padx=(6, 0))
+        self._swatch.bind("<Button-1>", lambda _e: self._open_color_picker())
+
+        size_row = stk.Frame(wrap, bg=PANEL_BG)
+        size_row.pack(pady=(8, 0))
+        stk.Label(
+            size_row, text=tr("icon_picker.size_label", "Size:"),
+            bg=PANEL_BG, fg=HEADER_FG,
+            font=ui_font(10),
+        ).pack(side="left", padx=(0, 4))
+        self._size_var = tk.StringVar(value=str(self._output_size))
+        self._size_menu = ctk.CTkOptionMenu(
+            size_row, values=[f"{s} px" for s in SIZE_OPTIONS],
+            width=100, height=26, dynamic_resizing=False,
+            corner_radius=style.BUTTON_RADIUS,
+            fg_color=style.SECONDARY_BG, button_color=style.SECONDARY_BG,
+            button_hover_color=style.SECONDARY_HOVER,
+            text_color=HEADER_FG,
+            dropdown_fg_color=HEADER_BG,
+            dropdown_hover_color=ROW_SELECTED,
+            dropdown_text_color=HEADER_FG,
+            command=self._on_size_change,
+        )
+        self._size_menu.set(f"{self._output_size} px")
+        self._size_menu.pack(side="left")
+
+    def _build_footer(self, parent) -> None:
+        foot = stk.Frame(parent, bg=BG)
+        foot.pack(fill="x", padx=10, pady=(4, 10))
+        self._apply_btn = style.primary_button(
+            foot, tr("icon_picker.apply", "Apply"),
+            command=self._on_apply, width=140,
+        )
+        self._apply_btn.configure(state="disabled")
+        self._apply_btn.pack(side="right")
+        style.secondary_button(
+            foot, tr("icon_picker.cancel", "Cancel"),
+            command=self._on_cancel, width=90,
+        ).pack(side="right", padx=(0, 8))
+
+    # ------------------------------------------------------------------
+    # Categories sidebar
+    # ------------------------------------------------------------------
+    def _populate_categories(self) -> None:
+        self._build_cat_button("_all", tr("icon_picker.cat_all", "All"), len(self._icons_meta))
+        for key in sorted(self._categories.keys()):
+            cat = self._categories[key]
+            count = len(cat.get("icons", []))
+            if count == 0:
+                continue
+            self._build_cat_button(key, cat.get("title", key), count)
+        self._highlight_cat(self._active_cat)
+
+    def _build_cat_button(
+        self, key: str, title: str, count: int,
+    ) -> None:
+        row = stk.Frame(self._cat_scroll, bg=PANEL_BG, cursor="hand2")
+        row.pack(fill="x", padx=2, pady=1)
+        lbl = stk.Label(
+            row, text=f"  {title}  ({count})", bg=PANEL_BG, fg=HEADER_FG,
+            font=ui_font(10), anchor="w",
+        )
+        lbl.pack(fill="x", padx=4, pady=4)
+        for w in (row, lbl):
+            w.bind("<Button-1>", lambda _e, k=key: self._on_cat_click(k))
+        self._cat_buttons[key] = row
+
+    def _on_cat_click(self, key: str) -> None:
+        self._active_cat = key
+        self._highlight_cat(key)
+        self._refresh_grid()
+        # Reset scroll to top so the new category opens at its first
+        # row regardless of where the previous category was scrolled.
+        # CTkScrollableFrame doesn't expose ``yview_moveto`` directly —
+        # reach into the inner canvas. Defer with after_idle so the
+        # grid rebuild has time to update the scroll region first;
+        # otherwise yview_moveto sees stale dimensions and lands at
+        # the wrong fraction.
+        try:
+            self._grid_scroll.after_idle(
+                lambda: self._grid_scroll._parent_canvas.yview_moveto(0.0),
+            )
+        except Exception:
+            pass
+
+    def _highlight_cat(self, active_key: str | None) -> None:
+        for key, row in self._cat_buttons.items():
+            bg = ROW_SELECTED if key == active_key else PANEL_BG
+            try:
+                row.configure(bg=bg)
+                for child in row.winfo_children():
+                    child.configure(bg=bg)
+            except tk.TclError:
+                pass
+
+    # ------------------------------------------------------------------
+    # Icon grid
+    # ------------------------------------------------------------------
+    def _on_search_change(self) -> None:
+        self._search = self._search_var.get().strip().lower()
+        self._refresh_grid()
+
+    def _filtered_icons(self) -> list[str]:
+        q = self._search
+        cat_key = self._active_cat
+        if cat_key and cat_key != "_all":
+            cat = self._categories.get(cat_key, {})
+            names = list(cat.get("icons", []))
+        else:
+            names = list(self._icons_meta.keys())
+        if q:
+            def matches(n: str) -> bool:
+                if q in n:
+                    return True
+                meta = self._icons_meta.get(n, {})
+                tags = meta.get("tags", [])
+                return any(q in t.lower() for t in tags)
+            names = [n for n in names if matches(n)]
+        names.sort()
+        return names
+
+    def _refresh_grid(self) -> None:
+        for child in list(self._grid_scroll.winfo_children()):
+            try:
+                child.destroy()
+            except tk.TclError:
+                pass
+        self._grid_cells.clear()
+
+        names = self._filtered_icons()
+        total = len(names)
+        capped = names[:MAX_ICONS]
+        truncated = total > MAX_ICONS
+
+        try:
+            if not truncated:
+                count_text = tr(
+                    "icon_picker.count_icons", "{total} icons",
+                ).format(total=total)
+            else:
+                count_text = tr(
+                    "icon_picker.count_truncated",
+                    "showing {shown} of {total} — refine search",
+                ).format(shown=MAX_ICONS, total=total)
+            self._count_lbl.configure(text=count_text)
+        except tk.TclError:
+            pass
+
+        if not capped:
+            ctk.CTkLabel(
+                self._grid_scroll,
+                text=tr("icon_picker.no_match", "No icons match."),
+                text_color=DIM_FG, font=ui_font(11),
+            ).grid(row=0, column=0, columnspan=GRID_COLS, pady=40)
+            return
+
+        for i, name in enumerate(capped):
+            self._build_cell(name, i // GRID_COLS, i % GRID_COLS)
+
+        if self._selected and self._selected in self._grid_cells:
+            self._highlight_cell(self._selected, True)
+
+    def _build_cell(self, name: str, row: int, col: int) -> None:
+        cell = stk.Frame(
+            self._grid_scroll, bg=GRID_BG, cursor="hand2",
+            width=THUMB + 16, height=THUMB + 16,
+        )
+        cell.grid(row=row, column=col, padx=2, pady=2, sticky="nsew")
+        cell.grid_propagate(False)
+        thumb = self._thumb_for(name, self._tint, THUMB)
+        lbl = stk.Label(
+            cell, bg=GRID_BG,
+            image=thumb if thumb else None,
+            text="" if thumb else "?", fg=DIM_FG,
+        )
+        if thumb is not None:
+            lbl.image = thumb  # keep ref
+        lbl.place(relx=0.5, rely=0.5, anchor="center")
+        for w in (cell, lbl):
+            w.bind("<Button-1>", lambda _e, n=name: self._on_cell_click(n))
+            w.bind(
+                "<Double-Button-1>",
+                lambda _e, n=name: self._on_cell_double(n),
+            )
+            w.bind("<Enter>", lambda _e, n=name: self._on_cell_enter(n))
+            w.bind("<Leave>", lambda _e, n=name: self._on_cell_leave(n))
+        self._grid_cells[name] = cell
+
+    def _on_cell_click(self, name: str) -> None:
+        prev = self._selected
+        self._selected = name
+        if prev and prev in self._grid_cells:
+            self._highlight_cell(prev, False)
+        self._highlight_cell(name, True)
+        self._refresh_preview()
+        try:
+            self._apply_btn.configure(state="normal")
+        except tk.TclError:
+            pass
+
+    def _on_cell_double(self, name: str) -> None:
+        self._on_cell_click(name)
+        self._on_apply()
+
+    def _on_cell_enter(self, name: str) -> None:
+        if name == self._selected:
+            return
+        self._set_cell_bg(name, GRID_HOVER)
+
+    def _on_cell_leave(self, name: str) -> None:
+        if name == self._selected:
+            return
+        self._set_cell_bg(name, GRID_BG)
+
+    def _highlight_cell(self, name: str, selected: bool) -> None:
+        self._set_cell_bg(name, GRID_SELECTED if selected else GRID_BG)
+
+    def _set_cell_bg(self, name: str, bg: str) -> None:
+        cell = self._grid_cells.get(name)
+        if cell is None:
+            return
+        try:
+            cell.configure(bg=bg)
+            for c in cell.winfo_children():
+                c.configure(bg=bg)
+        except tk.TclError:
+            pass
+
+    # ------------------------------------------------------------------
+    # Preview
+    # ------------------------------------------------------------------
+    def _refresh_preview(self) -> None:
+        if not self._selected:
+            return
+        big = self._thumb_for(self._selected, self._tint, PREVIEW_SIZE)
+        try:
+            if big is not None:
+                self._preview_lbl.configure(image=big, text="")
+                self._preview_lbl.image = big
+            else:
+                self._preview_lbl.configure(image="", text="?")
+            self._name_lbl.configure(text=self._selected)
+            tags = self._icons_meta.get(self._selected, {}).get("tags", [])
+            self._tags_lbl.configure(
+                text=", ".join(tags[:8]) if tags else "",
+            )
+        except tk.TclError:
+            pass
+
+    # ------------------------------------------------------------------
+    # Tint
+    # ------------------------------------------------------------------
+    def _on_tint_commit(self) -> None:
+        new = self._tint_entry.get().strip()
+        if not new:
+            return
+        if not new.startswith("#"):
+            new = "#" + new
+        try:
+            self._parse_hex(new)
+        except ValueError:
+            self._tint_entry.delete(0, "end")
+            self._tint_entry.insert(0, self._tint)
+            return
+        if new.lower() == self._tint.lower():
+            return
+        self._tint = new
+        try:
+            self._swatch.configure(bg=new)
+            self._tint_entry.delete(0, "end")
+            self._tint_entry.insert(0, new)
+        except tk.TclError:
+            pass
+        # New tint invalidates every cached thumbnail.
+        self._thumb_cache.clear()
+        self._refresh_grid()
+        self._refresh_preview()
+
+    def _on_size_change(self, value: str) -> None:
+        try:
+            self._output_size = int(value.split()[0])
+        except (ValueError, IndexError):
+            return
+
+    def _open_color_picker(self) -> None:
+        try:
+            from app.ui.tint_color_picker import ColorPickerDialog
+        except ImportError:
+            return
+        dlg = ColorPickerDialog(self, initial_color=self._tint)
+        dlg.wait_window()
+        new = getattr(dlg, "result", None)
+        if not new:
+            return
+        self._tint_entry.delete(0, "end")
+        self._tint_entry.insert(0, new)
+        self._on_tint_commit()
+
+    @staticmethod
+    def _parse_hex(color: str) -> tuple[int, int, int]:
+        v = color.lstrip("#")
+        if len(v) == 3:
+            v = "".join(c * 2 for c in v)
+        if len(v) != 6:
+            raise ValueError(color)
+        return int(v[0:2], 16), int(v[2:4], 16), int(v[4:6], 16)
+
+    # ------------------------------------------------------------------
+    # Thumbnail tinting
+    # ------------------------------------------------------------------
+    def _thumb_for(
+        self, name: str, tint: str, size: int,
+    ) -> tk.PhotoImage | None:
+        key = (name, tint, size)
+        cached = self._thumb_cache.get(key)
+        if cached is not None:
+            return cached
+        path = PNG_DIR / f"{name}.png"
+        if not path.exists():
+            return None
+        try:
+            tinted = self._tint_image(path, tint, size)
+            photo = ImageTk.PhotoImage(tinted)
+            self._thumb_cache[key] = photo
+            return photo
+        except Exception:
+            return None
+
+    def _tint_image(
+        self, path: Path, tint: str, size: int | None = None,
+    ) -> Image.Image:
+        r, g, b = self._parse_hex(tint)
+        src = Image.open(path).convert("RGBA")
+        solid = Image.new("RGBA", src.size, (r, g, b, 255))
+        empty = Image.new("RGBA", src.size, (0, 0, 0, 0))
+        alpha = src.split()[3]
+        tinted = Image.composite(solid, empty, alpha)
+        if size is not None and tinted.size != (size, size):
+            tinted = tinted.resize((size, size), Image.LANCZOS)
+        return tinted
+
+    # ------------------------------------------------------------------
+    # Apply / Cancel
+    # ------------------------------------------------------------------
+    def _on_apply(self) -> None:
+        if not self._selected:
+            return
+        src = PNG_DIR / f"{self._selected}.png"
+        if not src.exists():
+            show_error(
+                tr("icon_picker.icon_missing_title", "Icon missing"),
+                tr(
+                    "icon_picker.icon_missing_msg",
+                    "Bundled icon file is missing: {name}",
+                ).format(name=src.name),
+                parent=self,
+            )
+            return
+        try:
+            self.target_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            show_error(
+                tr("icon_picker.save_failed_title", "Save failed"),
+                tr(
+                    "icon_picker.save_failed_dir",
+                    "Could not create target folder:\n{exc}",
+                ).format(exc=exc),
+                parent=self,
+            )
+            return
+        dst = self.target_dir / f"{self._selected}.png"
+        try:
+            tinted = self._tint_image(src, self._tint, self._output_size)
+            tinted.save(dst, "PNG")
+        except Exception as exc:
+            show_error(
+                tr("icon_picker.save_failed_title", "Save failed"),
+                tr(
+                    "icon_picker.save_failed_save",
+                    "Could not save tinted icon:\n{exc}",
+                ).format(exc=exc),
+                parent=self,
+            )
+            return
+        self.result = str(dst)
+        self.destroy()
+
+    def _on_cancel(self) -> None:
+        self.result = None
+        self.destroy()

@@ -1,0 +1,40 @@
+{
+  "app/core/platform_compat.py": {
+    "ctrl_label": 2
+  },
+  "app/ui/color_palette_window.py": {
+    "consolas": 1
+  },
+  "app/ui/console_window.py": {
+    "control_bind": 1,
+    "segoe_ui": 1
+  },
+  "app/ui/dev_test_windows.py": {
+    "consolas": 1
+  },
+  "app/ui/dialog_utils.py": {
+    "raw_grab_set": 1
+  },
+  "app/ui/main_shortcuts.py": {
+    "control_bind": 2
+  },
+  "app/ui/main_window.py": {
+    "control_bind": 1
+  },
+  "app/ui/managed_window.py": {
+    "raw_grab_set": 1
+  },
+  "app/ui/project_panel_pages.py": {
+    "ctrl_label": 1
+  },
+  "app/ui/system_fonts.py": {
+    "segoe_ui": 5
+  },
+  "app/ui/tint_color_picker/dialog.py": {
+    "raw_grab_set": 1
+  },
+  "app/ui/transitions_demo/__init__.py": {
+    "consolas": 2,
+    "segoe_ui": 2
+  }
+}

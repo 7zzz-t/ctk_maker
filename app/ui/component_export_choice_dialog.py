@@ -1,0 +1,391 @@
+"""Modal — first step of the Export flow. Asks whether the export is
+for personal use (existing local-save dialog) or for publishing to the
+public Component Library (placeholder window for now).
+"""
+
+from __future__ import annotations
+
+import tkinter as tk
+import webbrowser
+from pathlib import Path
+from typing import Any
+
+import customtkinter as ctk
+
+from app.core.i18n import tr
+from app.ui.managed_window import ManagedToplevel
+from app.ui.system_fonts import derive_mono_font
+
+
+COMPONENT_LIBRARY_URL = (
+    "https://kandelucky.github.io/ctkMaker-component-library/"
+)
+
+
+class ComponentExportChoiceDialog(ManagedToplevel):
+    default_size = (520, 380)
+    min_size = (480, 360)
+    panel_padding = (0, 0)
+    modal = True
+    window_resizable = (False, False)
+
+    def __init__(self, parent, source_path: Path):
+        self.window_title = tr("comp_export_choice.title", "Export component")
+        self._source_path = source_path
+        self._parent = parent
+        self.result: str | None = None
+        super().__init__(parent)
+
+    def default_offset(self, parent) -> tuple[int, int]:
+        try:
+            parent.update_idletasks()
+            px = parent.winfo_rootx()
+            py = parent.winfo_rooty()
+            pw = parent.winfo_width()
+            ph = parent.winfo_height()
+            w, h = self.default_size
+            return (
+                max(0, px + (pw - w) // 2),
+                max(0, py + (ph - h) // 2),
+            )
+        except tk.TclError:
+            return (100, 100)
+
+    def build_content(self) -> ctk.CTkFrame:
+        container = ctk.CTkFrame(self, fg_color="transparent")
+
+        body = ctk.CTkFrame(container, fg_color="transparent")
+        body.pack(padx=24, pady=(20, 8), fill="x")
+
+        ctk.CTkLabel(
+            body,
+            text=tr("comp_export_choice.share_heading", "Share your component"),
+            font=ctk.CTkFont(size=15, weight="bold"),
+            text_color="#e6e6e6", anchor="w",
+        ).pack(anchor="w", pady=(0, 8))
+
+        ctk.CTkLabel(
+            body,
+            text=tr(
+                "comp_export_choice.share_body",
+                "Published components appear in the public CTkMaker "
+                "library — credited to you, under your chosen license. "
+                "Others can discover and reuse your work, and you "
+                "benefit from theirs.",
+            ),
+            font=ctk.CTkFont(size=10),
+            text_color="#bdbdbd",
+            justify="left", anchor="w", wraplength=440,
+        ).pack(anchor="w", pady=(0, 14))
+
+        ctk.CTkButton(
+            body, text=tr("comp_export_choice.visit_library", "🌐  Visit Component Library"),
+            width=240, height=34, corner_radius=6,
+            font=ctk.CTkFont(size=11, weight="bold"),
+            command=self._on_visit_library,
+        ).pack(pady=(0, 16))
+
+        sep = ctk.CTkFrame(body, height=1, fg_color="#3a3a3a")
+        sep.pack(fill="x", pady=(0, 14))
+
+        choices = ctk.CTkFrame(body, fg_color="transparent")
+        choices.pack(fill="x", pady=(0, 4))
+        choices.grid_columnconfigure(0, weight=1, uniform="choice")
+        choices.grid_columnconfigure(1, weight=1, uniform="choice")
+
+        personal_col = ctk.CTkFrame(choices, fg_color="transparent")
+        personal_col.grid(row=0, column=0, padx=(0, 8), sticky="nsew")
+        ctk.CTkButton(
+            personal_col, text=tr("comp_export_choice.personal_use", "Personal Use"),
+            height=44, corner_radius=6,
+            fg_color="#3c3c3c", hover_color="#4a4a4a",
+            text_color="#e6e6e6",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            command=self._on_personal,
+        ).pack(fill="x")
+        ctk.CTkLabel(
+            personal_col,
+            text=tr("comp_export_choice.personal_hint", "Saves the .ctkcomp file\nlocally for your own use."),
+            font=ctk.CTkFont(size=9),
+            text_color="#888888",
+            justify="center",
+        ).pack(pady=(6, 0))
+
+        publish_col = ctk.CTkFrame(choices, fg_color="transparent")
+        publish_col.grid(row=0, column=1, padx=(8, 0), sticky="nsew")
+        ctk.CTkButton(
+            publish_col, text=tr("comp_export_choice.publish_community", "Publish to Community"),
+            height=44, corner_radius=6,
+            font=ctk.CTkFont(size=11, weight="bold"),
+            command=self._on_publish,
+        ).pack(fill="x")
+        ctk.CTkLabel(
+            publish_col,
+            text=tr("comp_export_choice.publish_hint", "Prepares the file with license\n& attribution metadata."),
+            font=ctk.CTkFont(size=9),
+            text_color="#888888",
+            justify="center",
+        ).pack(pady=(6, 0))
+
+        footer = ctk.CTkFrame(container, fg_color="transparent")
+        footer.pack(fill="x", padx=24, pady=(8, 18))
+        ctk.CTkButton(
+            footer, text=tr("comp_export_choice.cancel", "Cancel"), width=90, height=30,
+            corner_radius=4,
+            fg_color="#3c3c3c", hover_color="#4a4a4a",
+            command=self._on_cancel,
+        ).pack(side="right")
+        return container
+
+    def _on_visit_library(self) -> None:
+        try:
+            webbrowser.open(COMPONENT_LIBRARY_URL, new=2)
+        except Exception:
+            pass
+
+    def _on_personal(self) -> None:
+        self.result = "personal"
+        self.destroy()
+
+    def _on_publish(self) -> None:
+        self.result = "publish"
+        self.destroy()
+
+    def _on_cancel(self) -> None:
+        self.result = None
+        self.destroy()
+
+
+MIT_LICENSE_TEXT = """MIT License
+
+Copyright (c) <year> <author>
+
+Permission is hereby granted, free of charge, to any person obtaining
+a copy of this software and associated documentation files (the
+"Software"), to deal in the Software without restriction, including
+without limitation the rights to use, copy, modify, merge, publish,
+distribute, sublicense, and/or sell copies of the Software, and to
+permit persons to whom the Software is furnished to do so, subject to
+the following conditions:
+
+The above copyright notice and this permission notice shall be
+included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
+BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
+ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE."""
+
+
+class _MITTextWindow(ManagedToplevel):
+    default_size = (560, 440)
+    min_size = (480, 360)
+    fg_color = "#1a1a1a"
+    panel_padding = (0, 0)
+    modal = True
+
+    def __init__(self, parent):
+        self.window_title = tr("comp_export_choice.mit_title", "MIT License — full text")
+        super().__init__(parent)
+
+    def build_content(self) -> ctk.CTkFrame:
+        container = ctk.CTkFrame(self, fg_color="transparent")
+
+        ctk.CTkButton(
+            container, text=tr("comp_export_choice.close", "Close"), width=90, height=30,
+            corner_radius=4,
+            fg_color="#3c3c3c", hover_color="#4a4a4a",
+            command=self.destroy,
+        ).pack(side="bottom", pady=(0, 14))
+
+        textbox = ctk.CTkTextbox(
+            container, font=derive_mono_font(size=10),  # type: ignore[arg-type]
+            fg_color="#111111", text_color="#cfcfcf",
+            wrap="word",
+        )
+        textbox.pack(fill="both", expand=True, padx=14, pady=(14, 8))
+        textbox.insert("1.0", tr("comp_export_choice.mit_text", MIT_LICENSE_TEXT))
+        textbox.configure(state="disabled")
+        return container
+
+
+class ComponentPublishLicenseDialog(ManagedToplevel):
+    """License-agreement gate before the actual Publish form. Three
+    required confirmations + MIT-text viewer. ``result`` is True when
+    the user accepts.
+    """
+
+    default_size = (520, 460)
+    min_size = (480, 420)
+    fg_color = "#1a1a1a"
+    panel_padding = (0, 0)
+    modal = True
+    window_resizable = (False, False)
+
+    def __init__(self, parent, source_path: Path):
+        self.window_title = tr("comp_export_choice.license_title", "License agreement")
+        self._source_path = source_path
+        self.result: bool = False
+        self._var_rights = tk.BooleanVar(master=parent, value=False)
+        self._var_mit = tk.BooleanVar(master=parent, value=False)
+        self._var_responsibility = tk.BooleanVar(master=parent, value=False)
+        super().__init__(parent)
+
+    def default_offset(self, parent) -> tuple[int, int]:
+        try:
+            parent.update_idletasks()
+            px = parent.winfo_rootx()
+            py = parent.winfo_rooty()
+            pw = parent.winfo_width()
+            ph = parent.winfo_height()
+            w, h = self.default_size
+            return (
+                max(0, px + (pw - w) // 2),
+                max(0, py + (ph - h) // 2),
+            )
+        except tk.TclError:
+            return (100, 100)
+
+    def build_content(self) -> ctk.CTkFrame:
+        container = ctk.CTkFrame(self, fg_color="transparent")
+
+        body = ctk.CTkFrame(container, fg_color="transparent")
+        body.pack(padx=24, pady=(20, 8), fill="x")
+
+        ctk.CTkLabel(
+            body,
+            text=tr("comp_export_choice.license_heading", "License agreement"),
+            font=ctk.CTkFont(size=15, weight="bold"),
+            text_color="#e6e6e6", anchor="w",
+        ).pack(anchor="w", pady=(0, 4))
+        ctk.CTkLabel(
+            body,
+            text=tr("comp_export_choice.license_subtitle", "By publishing, you confirm:"),
+            font=ctk.CTkFont(size=10),
+            text_color="#bdbdbd", anchor="w",
+        ).pack(anchor="w", pady=(0, 14))
+
+        check_kwargs: dict[str, Any] = dict(
+            font=ctk.CTkFont(size=10),
+            text_color="#dcdcdc",
+            checkbox_width=18, checkbox_height=18,
+            corner_radius=3,
+            command=self._refresh_accept,
+        )
+
+        ctk.CTkCheckBox(
+            body,
+            text=tr(
+                "comp_export_choice.rights_confirm",
+                "I have the right to redistribute everything bundled "
+                "in this component (my own work, or assets I'm "
+                "permitted to redistribute).",
+            ),
+            variable=self._var_rights,
+            **check_kwargs,
+        ).pack(anchor="w", pady=(0, 12), fill="x")
+
+        ctk.CTkCheckBox(
+            body,
+            text=tr(
+                "comp_export_choice.mit_confirm",
+                "I release this component under the MIT license. "
+                "Anyone can use, modify, and redistribute it. I "
+                "retain copyright; my name appears as the author.",
+            ),
+            variable=self._var_mit,
+            **check_kwargs,
+        ).pack(anchor="w", pady=(0, 12), fill="x")
+
+        ctk.CTkCheckBox(
+            body,
+            text=tr(
+                "comp_export_choice.responsibility_confirm",
+                "Responsibility for the contents stays with me, "
+                "the submitter.",
+            ),
+            variable=self._var_responsibility,
+            **check_kwargs,
+        ).pack(anchor="w", pady=(0, 14), fill="x")
+
+        # CTkCheckBox doesn't natively wrap; nudge the inner label.
+        for child in body.winfo_children():
+            if isinstance(child, ctk.CTkCheckBox):
+                label = getattr(child, "_text_label", None)
+                if label is not None:
+                    label.configure(wraplength=420, justify="left")
+
+        ctk.CTkButton(
+            body, text=tr("comp_export_choice.read_mit", "Read full MIT text"),
+            width=170, height=28, corner_radius=4,
+            fg_color="#2b2b2b", hover_color="#3a3a3a",
+            text_color="#9ec3ff",
+            font=ctk.CTkFont(size=10, underline=True),
+            command=self._show_mit_text,
+        ).pack(anchor="w", pady=(0, 4))
+
+        footer = ctk.CTkFrame(container, fg_color="transparent")
+        footer.pack(fill="x", padx=24, pady=(8, 18))
+        self._accept_btn = ctk.CTkButton(
+            footer, text=tr("comp_export_choice.accept", "Accept & continue"),
+            width=170, height=32, corner_radius=4,
+            font=ctk.CTkFont(size=11, weight="bold"),
+            command=self._on_accept,
+            state="disabled",
+        )
+        self._accept_btn.pack(side="right")
+        ctk.CTkButton(
+            footer, text=tr("comp_export_choice.cancel", "Cancel"), width=90, height=32,
+            corner_radius=4,
+            fg_color="#3c3c3c", hover_color="#4a4a4a",
+            command=self._on_cancel,
+        ).pack(side="right", padx=(0, 8))
+        return container
+
+    def _refresh_accept(self) -> None:
+        all_checked = (
+            self._var_rights.get()
+            and self._var_mit.get()
+            and self._var_responsibility.get()
+        )
+        self._accept_btn.configure(
+            state="normal" if all_checked else "disabled",
+        )
+
+    def _show_mit_text(self) -> None:
+        _MITTextWindow(self)
+
+    def _on_accept(self) -> None:
+        self.result = True
+        self.destroy()
+
+    def _on_cancel(self) -> None:
+        self.result = False
+        self.destroy()
+
+
+def run_export_flow(parent, source_path: Path) -> None:
+    """Run the full Export flow: choice dialog → either personal
+    export dialog or publish placeholder. Blocks until the chosen
+    sub-dialog closes.
+    """
+    choice = ComponentExportChoiceDialog(parent, source_path)
+    parent.wait_window(choice)
+    if choice.result == "personal":
+        from app.ui.component_export_dialog import ComponentExportDialog
+        dlg = ComponentExportDialog(parent, source_path)
+        parent.wait_window(dlg)
+    elif choice.result == "publish":
+        license_dlg = ComponentPublishLicenseDialog(parent, source_path)
+        parent.wait_window(license_dlg)
+        if not license_dlg.result:
+            return
+        from app.ui.component_publish_form_dialog import (
+            ComponentPublishFormDialog,
+        )
+        form = ComponentPublishFormDialog(parent, source_path)
+        parent.wait_window(form)

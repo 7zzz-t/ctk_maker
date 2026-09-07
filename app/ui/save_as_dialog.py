@@ -1,0 +1,415 @@
+"""Save As dialog for multi-page projects.
+
+Replaces the bare ``asksaveasfilename`` step with a 3-scope chooser
+matching the Export dialog's chrome (panel + label-aligned rows +
+section heading + prominent footer button). Scopes:
+
+    Save Page As...           → new page in the current project
+                                 (asset pool stays shared)
+    Save Project As...        → duplicate the entire project folder
+                                 to a new location
+    Save Page to New Project  → just the active page + the assets
+                                 it references → new project folder
+
+Returned ``result`` is a dict the caller dispatches on:
+    {"scope": "page", "name": "Settings"}
+    {"scope": "project", "name": "MyProj v2", "save_to": "C:/..."}
+    {"scope": "extract", "name": "MyPage", "save_to": "C:/..."}
+
+``None`` if the user cancelled.
+
+Legacy (single-file) projects don't open this dialog — main_window
+falls through to the classic Save As filedialog for them.
+"""
+
+from __future__ import annotations
+
+import tkinter as tk
+from pathlib import Path
+from tkinter import filedialog
+
+import customtkinter as ctk
+
+import app.ui.stk as stk
+
+from app.core.i18n import tr
+from app.core.paths import get_default_projects_dir
+from app.ui.dialogs.message import show_warning
+from app.ui.icons import load_icon
+from app.ui.managed_window import ManagedToplevel
+from app.ui.system_fonts import ui_font
+
+DIALOG_W = 540
+DIALOG_H = 410
+
+PANEL_BG = "#252526"
+SUBTITLE_FG = "#888888"
+FIELD_FG = "#cccccc"
+ENTRY_BORDER_NORMAL = "#3c3c3c"
+ENTRY_BORDER_ERROR = "#d04040"
+PREVIEW_FG = "#888888"
+SEPARATOR_BG = "#333333"
+
+LABEL_WIDTH = 88
+
+FORBIDDEN_NAME_CHARS = set('\\/:*?"<>|')
+
+_SCOPE_PAGE = "page"
+_SCOPE_PROJECT = "project"
+_SCOPE_EXTRACT = "extract"
+
+
+class SaveAsDialog(ManagedToplevel):
+    """Pick scope + name + (optional) destination for a save.
+
+    Parameters
+    ----------
+    parent : Tk widget
+        Owner toplevel.
+    project : Project
+        Source project. Used to default field values.
+    """
+
+    default_size = (DIALOG_W, DIALOG_H)
+    min_size = (DIALOG_W - 40, DIALOG_H - 40)
+    fg_color = "#1e1e1e"
+    panel_padding = (0, 0)
+    modal = True
+    window_resizable = (False, False)
+
+    def __init__(self, parent, project):
+        self.window_title = tr("save_as.window_title", "Save As")
+        self.project = project
+        self.result: dict | None = None
+
+        # Defaults pulled from the live project: current page name
+        # for the Page scope; project name for Project / Extract.
+        active_page_name = next(
+            (
+                p.get("name", "") for p in (project.pages or [])
+                if isinstance(p, dict) and p.get("id") == project.active_page_id
+            ),
+            "",
+        )
+
+        self._scope_var = tk.StringVar(master=parent, value=_SCOPE_PAGE)
+        self._name_var = tk.StringVar(
+            master=parent, value=active_page_name or "Untitled",
+        )
+        # "Save to" parent dir defaults to the source project's
+        # parent folder so the duplicate lands as a sibling — the
+        # user's "projects directory" by convention.
+        if project.folder_path:
+            default_save_dir = str(Path(project.folder_path).parent)
+        else:
+            default_save_dir = str(get_default_projects_dir())
+        self._save_to_var = tk.StringVar(master=parent, value=default_save_dir)
+        self._preview_var = tk.StringVar(master=parent)
+
+        self._name_entry: ctk.CTkEntry | None = None
+        self._save_to_entry: ctk.CTkEntry | None = None
+        self._save_to_btn: ctk.CTkButton | None = None
+
+        super().__init__(parent)
+
+        self._on_scope_change()  # prime preview + field enabled state
+
+        self._name_var.trace_add(
+            "write", lambda *_a: (
+                self._clear_name_error(), self._refresh_preview(),
+            ),
+        )
+        self._save_to_var.trace_add(
+            "write", lambda *_a: self._refresh_preview(),
+        )
+        self._scope_var.trace_add(
+            "write", lambda *_a: self._on_scope_change(),
+        )
+        self.bind("<Return>", lambda _e: self._on_save())
+
+    def default_offset(self, parent) -> tuple[int, int]:
+        try:
+            parent.update_idletasks()
+            px = parent.winfo_rootx()
+            py = parent.winfo_rooty()
+            pw = parent.winfo_width()
+            ph = parent.winfo_height()
+            w, h = self.default_size
+            return (
+                max(0, px + (pw - w) // 2),
+                max(0, py + (ph - h) // 2),
+            )
+        except tk.TclError:
+            return (100, 100)
+
+    def build_content(self) -> ctk.CTkFrame:
+        return self._build()
+
+    # ------------------------------------------------------------------
+    # Layout
+    # ------------------------------------------------------------------
+    def _build(self) -> ctk.CTkFrame:
+        container = ctk.CTkFrame(self, fg_color="transparent")
+        outer = ctk.CTkFrame(container, fg_color=PANEL_BG, corner_radius=6)
+        outer.pack(fill="both", expand=True, padx=10, pady=10)
+
+        ctk.CTkLabel(
+            outer, text=tr("save_as.save_as", "Save As"),
+            font=ui_font(11, "bold"),
+            text_color=SUBTITLE_FG, anchor="w",
+        ).pack(fill="x", padx=14, pady=(10, 10))
+
+        self._add_row(outer, tr("save_as.name", "Name"), self._build_name_entry)
+        self._add_row(outer, tr("save_as.save_to", "Save to"), self._build_save_to_row)
+        self._build_preview_label(outer)
+        self._refresh_preview()
+        self._add_separator(outer)
+
+        ctk.CTkLabel(
+            outer, text=tr("save_as.scope", "Scope") + ":",
+            font=ui_font(10, "bold"),
+            text_color=FIELD_FG, anchor="w",
+        ).pack(fill="x", padx=14, pady=(2, 6))
+
+        self._add_scope_option(
+            outer, _SCOPE_PAGE, tr("save_as.scope_page", "Save Page As..."),
+            tr("save_as.scope_page_blurb",
+               "Adds a new page in this project. The asset pool "
+               "(fonts / images / icons) stays shared."),
+        )
+        self._add_scope_option(
+            outer, _SCOPE_PROJECT, tr("save_as.scope_project", "Save Project As..."),
+            tr("save_as.scope_project_blurb",
+               "Duplicates the entire project folder — every page, "
+               "every asset, every backup — to a new location."),
+        )
+        self._add_scope_option(
+            outer, _SCOPE_EXTRACT, tr("save_as.scope_extract", "Save Page to New Project..."),
+            tr("save_as.scope_extract_blurb",
+               "Just this page plus the assets it actually references. "
+               "Unused assets stay in the source project."),
+        )
+
+        self._build_footer(outer)
+        return container
+
+    def _add_row(self, parent, label, builder) -> None:
+        row = ctk.CTkFrame(parent, fg_color="transparent")
+        row.pack(fill="x", padx=14, pady=2)
+        ctk.CTkLabel(
+            row, text=f"{label}:", width=LABEL_WIDTH, anchor="w",
+            font=ui_font(11), text_color=FIELD_FG,
+        ).pack(side="left")
+        builder(row)
+
+    def _add_separator(self, parent) -> None:
+        ctk.CTkFrame(parent, height=1, fg_color=SEPARATOR_BG).pack(
+            fill="x", padx=14, pady=(10, 6),
+        )
+
+    def _build_name_entry(self, row) -> None:
+        entry = ctk.CTkEntry(
+            row, textvariable=self._name_var, height=26,
+            corner_radius=3, font=ui_font(11), justify="left",
+            border_color=ENTRY_BORDER_NORMAL, border_width=1,
+        )
+        entry.pack(side="left", fill="x", expand=True)
+        self._name_entry = entry
+
+    def _build_save_to_row(self, row) -> None:
+        entry = ctk.CTkEntry(
+            row, textvariable=self._save_to_var, height=26,
+            corner_radius=3, font=ui_font(10), justify="left",
+            border_color=ENTRY_BORDER_NORMAL, border_width=1,
+        )
+        entry.pack(side="left", fill="x", expand=True, padx=(0, 4))
+        self._save_to_entry = entry
+        folder_icon = load_icon("folder", size=14)
+        btn = ctk.CTkButton(
+            row, text="" if folder_icon else "…",
+            image=folder_icon, width=28, height=26, corner_radius=3,
+            fg_color="#3c3c3c", hover_color="#4a4a4a",
+            command=self._on_pick_save_dir,
+        )
+        btn.pack(side="left")
+        self._save_to_btn = btn
+
+    def _build_preview_label(self, parent) -> None:
+        lbl = stk.Label(
+            parent, textvariable=self._preview_var,
+            font=ui_font(9, "italic"),
+            fg=PREVIEW_FG, bg=PANEL_BG,
+            anchor="w", justify="left", width=58,
+        )
+        lbl.pack(fill="x", padx=(LABEL_WIDTH + 14, 14), pady=(0, 2))
+
+    def _add_scope_option(
+        self, parent, value: str, title: str, blurb: str,
+    ) -> None:
+        wrap = ctk.CTkFrame(parent, fg_color="transparent")
+        wrap.pack(fill="x", padx=14, pady=1)
+        rb = ctk.CTkRadioButton(
+            wrap, text=title, variable=self._scope_var, value=value,
+            font=ui_font(11), text_color=FIELD_FG,
+            radiobutton_height=16, radiobutton_width=16,
+            border_width_checked=4, border_width_unchecked=2,
+        )
+        rb.pack(anchor="w")
+        ctk.CTkLabel(
+            wrap, text=blurb, font=ui_font(9),
+            text_color=SUBTITLE_FG, anchor="w", justify="left",
+            wraplength=DIALOG_W - 80,
+        ).pack(anchor="w", padx=(28, 0), pady=(0, 4))
+
+    def _build_footer(self, parent) -> None:
+        footer = ctk.CTkFrame(parent, fg_color="transparent")
+        footer.pack(fill="x", padx=14, pady=(8, 10), side="bottom")
+        ctk.CTkButton(
+            footer, text=tr("save_as.cancel", "Cancel"),
+            width=80, height=28, corner_radius=3,
+            fg_color="#3c3c3c", hover_color="#4a4a4a",
+            command=self._on_cancel,
+        ).pack(side="right")
+        ctk.CTkButton(
+            footer, text=tr("save_as.save", "Save"),
+            width=100, height=28, corner_radius=3,
+            command=self._on_save,
+        ).pack(side="right", padx=(0, 8))
+
+    # ------------------------------------------------------------------
+    # Behaviour
+    # ------------------------------------------------------------------
+    def _on_scope_change(self) -> None:
+        # "Save to" only meaningful for Project / Extract scopes —
+        # the in-project Page scope reuses the existing folder.
+        scope = self._scope_var.get()
+        save_to_active = scope in (_SCOPE_PROJECT, _SCOPE_EXTRACT)
+        state = "normal" if save_to_active else "disabled"
+        if self._save_to_entry is not None:
+            self._save_to_entry.configure(state=state)
+        if self._save_to_btn is not None:
+            self._save_to_btn.configure(state=state)
+        # Default name shifts based on scope: Page reuses the
+        # current page name; Project/Extract use the project name
+        # so the user sees a sensible starting point.
+        self._refresh_preview()
+
+    def _on_pick_save_dir(self) -> None:
+        path = filedialog.askdirectory(
+            parent=self,
+            title=tr("save_as.choose_save_location", "Choose save location"),
+            initialdir=self._save_to_var.get() or str(Path.home()),
+        )
+        if path:
+            self._save_to_var.set(path)
+
+    def _refresh_preview(self) -> None:
+        scope = self._scope_var.get()
+        name = (self._name_var.get() or "").strip()
+        if not name:
+            self._preview_var.set("")
+            return
+        if scope == _SCOPE_PAGE:
+            from app.core.project_folder import slugify_page_name
+            slug = slugify_page_name(name)
+            target = (
+                tr("save_as.this_project", "<this project>") + f"/assets/pages/{slug}.ctkproj"
+                if self.project.folder_path
+                else f"{slug}.ctkproj"
+            )
+        else:
+            save_to = self._save_to_var.get() or ""
+            if not save_to:
+                self._preview_var.set("")
+                return
+            target = str(Path(save_to) / name) + "/"
+        max_len = 56
+        display = target
+        if len(display) > max_len:
+            display = "..." + display[-(max_len - 3):]
+        self._preview_var.set(f"→ {display}")
+
+    # ------------------------------------------------------------------
+    # Validation + result
+    # ------------------------------------------------------------------
+    def _flag_name_error(self) -> None:
+        try:
+            self.bell()
+        except tk.TclError:
+            pass
+        if self._name_entry is not None:
+            self._name_entry.configure(border_color=ENTRY_BORDER_ERROR)
+
+    def _clear_name_error(self) -> None:
+        if self._name_entry is not None:
+            self._name_entry.configure(border_color=ENTRY_BORDER_NORMAL)
+
+    def _on_save(self) -> None:
+        name = (self._name_var.get() or "").strip()
+        if not name:
+            self._flag_name_error()
+            return
+        if any(c in FORBIDDEN_NAME_CHARS for c in name):
+            self._flag_name_error()
+            show_warning(
+                tr("save_as.invalid_name_title", "Invalid name"),
+                tr("save_as.invalid_name_msg",
+                   "Name may not contain any of these characters:\n\n"
+                   "    \\  /  :  *  ?  \"  <  >  |"),
+                parent=self,
+            )
+            return
+        scope = self._scope_var.get()
+        result: dict = {"scope": scope, "name": name}
+        if scope in (_SCOPE_PROJECT, _SCOPE_EXTRACT):
+            save_to = (self._save_to_var.get() or "").strip()
+            if not save_to:
+                self._flag_name_error()
+                return
+            save_to_path = Path(save_to).expanduser()
+            if not save_to_path.exists():
+                show_warning(
+                    tr("save_as.save_location_missing_title", "Save location missing"),
+                    tr("save_as.save_location_missing_msg",
+                       "The save location does not exist:\n{path}").format(path=save_to),
+                    parent=self,
+                )
+                return
+            target_folder = save_to_path / name
+            if target_folder.exists():
+                show_warning(
+                    tr("save_as.folder_exists_title", "Folder exists"),
+                    tr("save_as.folder_exists_msg",
+                       "A folder named '{name}' already exists at:\n\n"
+                       "{path}\n\nPick a different name or save location.").format(
+                        name=name, path=save_to_path,
+                    ),
+                    parent=self,
+                )
+                self._flag_name_error()
+                return
+            result["save_to"] = str(save_to_path)
+        elif scope == _SCOPE_PAGE:
+            # Same-name guard mirrors add_page's check so the user
+            # gets the failure surface in this dialog instead of
+            # after dismissal.
+            if any(
+                isinstance(p, dict)
+                and (p.get("name") or "").strip().lower()
+                == name.lower()
+                for p in (self.project.pages or [])
+            ):
+                show_warning(
+                    tr("save_as.page_name_in_use_title", "Page name in use"),
+                    tr("save_as.page_name_in_use_msg",
+                       "A page named '{name}' already exists in this project.").format(name=name),
+                    parent=self,
+                )
+                self._flag_name_error()
+                return
+        self.result = result
+        self.destroy()
+
+    def _on_cancel(self) -> None:
+        self.result = None
+        self.destroy()

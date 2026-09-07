@@ -1,0 +1,222 @@
+# CTkMaker — Architecture
+
+CTkMaker is a desktop visual designer for [CustomTkinter](https://github.com/TomSchimansky/CustomTkinter) (Python 3.10+, Windows-tested). Drag widgets onto a multi-document canvas, edit properties, attach event handlers, and export to runnable Python code.
+
+This document is the entry point. Deeper detail in:
+
+- [DATA_MODEL.md](DATA_MODEL.md) — persistent classes (Project, Document, WidgetNode, Variable, Reference)
+- [EVENT_BUS.md](EVENT_BUS.md) — pub/sub topology
+- [EXPORT.md](EXPORT.md) — `.ctkproj` → `.py` pipeline
+- [EXTENSION.md](EXTENSION.md) — adding widgets, property editors, components
+- [CONCEPTS.md](CONCEPTS.md) — user-facing concepts (Project / Page / Window / Variable / Reference / Handler / Component)
+- [WIDGETS.md](WIDGETS.md) — every widget's properties, types, defaults, nuances
+- [WINDOW_STYLE.md](WINDOW_STYLE.md) — `ManagedToplevel` base + `style.py` tokens for floating tool windows
+- [AI_CHEATSHEET.md](AI_CHEATSHEET.md) — distilled quick reference for AI prompts
+
+## Layers
+
+Top-down. Each layer depends only on layers below it (with two documented exceptions — see [Layer notes](#layer-notes)).
+
+| Layer | Path | Responsibility |
+|---|---|---|
+| **Entry** | [main.py](../../main.py) | CTk theme + appearance, crash handlers, instantiate `MainWindow`, `mainloop()` |
+| **UI** | [app/ui/](../../app/ui/) | `MainWindow`, panels, dialogs, workspace canvas, properties inspector |
+| **Model** | [app/core/](../../app/core/) | In-memory project state, event bus, undo/redo, autosave, settings |
+| **Widgets** | [app/widgets/](../../app/widgets/) | Per-widget descriptors (schema, defaults, runtime, export rules) |
+| **I/O** | [app/io/](../../app/io/) | Project save/load, code export, CTkScript scanning, component zip pack/unpack |
+
+The PyPI package at [ctkmaker/](../../ctkmaker/) is a name-reservation stub. Runtime entry is always `python main.py`.
+
+## Naming model — project / page / window
+
+Fresh-project defaults (2026-07-14). Each level's name states its role; no level borrows a neighbour's name:
+
+| Level | Default | Shows in | Feeds |
+|---|---|---|---|
+| **Project** | user-chosen (e.g. `Demo`) | hero bar; exported main-window titlebar | project folder name |
+| **Page** | `MainPage` → file `mainpage.ctkproj` (via `slugify_page_name`, same rule as `add_page`) | hero bar (`CTkMaker vX — Demo / MainPage •`); Pages panel | export scope naming |
+| **Window** | `Main Window` (`DEFAULT_MAIN_WINDOW_NAME` in `document.py`) | canvas chrome | exported class name (`class MainWindow(ctk.CTk)`) |
+
+Exported title rule: a main window still named `DEFAULT_MAIN_WINDOW_NAME` emits `self.title(<project name>)`; a renamed main window or a dialog emits its own name verbatim. Projects created before this scheme (main window named after the project) export byte-identical output — the rule falls through — so there is no migration.
+
+## Runtime dependency — modifiable CustomTkinter fork
+
+`import customtkinter as ctk` in ctk_maker source resolves to **[ctkmaker-core](https://github.com/kandelucky/ctkmaker-core)**, a maintained CustomTkinter fork at `c:/Users/likak/Desktop/ctkmaker_core/` (installed editable, so source changes are picked up live).
+
+This means CustomTkinter is **not a sealed dependency** — when a CTk bug or missing kwarg blocks ctkmaker work, fix it at fork source level.
+
+**The fork's primary purpose is export cleanliness.** Anything an exported `.py` script needs at runtime — runtime widget classes, font registration helpers, bind-fan-out machinery — lives in the fork, so exports `import customtkinter` and reach those APIs natively instead of CTkMaker inlining them via `inspect.getsource` or string-literal emission. App-level workarounds in `app/widgets/runtime/` and `app/io/code_exporter/runtime_helpers.py` are an anti-pattern when the body lands in exported files; that work belongs in `customtkinter/` (the fork). `app/widgets/runtime/` is reserved for behavior that is editor-only (selection state, editor canvas integration, etc.) and therefore never reaches exports.
+
+See [AI_CHEATSHEET.md](AI_CHEATSHEET.md) "CustomTkinter is editable" for the decision rule on new additions and the fix → ship workflow.
+
+## Module map
+
+### `app/core/` — model
+
+| File | Class / role | Purpose |
+|---|---|---|
+| `project.py` | `Project` | Top-level container — documents, global variables, event bus, history. Public API contract. |
+| `document.py` | `Document` | One window in a project (Main or Toplevel). Widget tree + window properties + local variables + attached components. |
+| `widget_node.py` | `WidgetNode` | Tree node — properties, children, handlers (`script_call`), attached components, group_id. |
+| `variables.py` | `VariableEntry`, `make_var_token`, `BINDING_WIRINGS` | Tk `*Var` schema (`str` / `int` / `float` / `bool` / `color`) + `var:<uuid>` token system + property→Tk-kwarg binding map. Cosmetic bindings (no `BINDING_WIRINGS` entry — e.g. `fg_color`) are resolved as literals at build time and rebuilt by `workspace.core` on `variable_default_changed`; wired bindings update live via Tk's `textvariable` / `variable`. |
+| `event_bus.py` | `EventBus` | Pub/sub. Single instance per `Project`. |
+| `history.py` | `History` | Undo/redo with coalesce window. |
+| `commands/` | `Command` subclasses | Every undo-able mutation goes through a `Command`. Package: `base.py`, `documents.py`, `flags.py`, `handlers.py`, `properties.py`, `tree.py`, `variables.py`. |
+| `autosave.py` | autosave timer | Periodic snapshots to `.autosave/` sidecar. |
+| `project_folder.py` | folder layout | Multi-page project scaffolding (`project.json`, `assets/pages/`) + the Python env scaffold (`requirements.txt`, `pyrightconfig.json`, `.gitignore`, `ctkmaker.py` sidecar, empty `scripts/`), re-run on every open. **Decision:** `pyrightconfig.json` is per-machine — its `extraPaths` carries the absolute path of the live `customtkinter` install (detected via `customtkinter.__file__`) so a fresh project type-checks without a `.venv`. Because that path dies on machine change or install move, the file is excluded by the generated `.gitignore` and self-heals on open: a config still matching our generated shape whose `extraPaths` no longer exists on disk is rewritten with a fresh detection; a user-customised config is never touched. **Decision:** `write_project_meta` treats an identical rewrite as a no-op (no write, no `.bak` rotation), so `project.json.bak` only ever holds a genuinely older version — the New Project flow saves twice back-to-back and would otherwise ship every fresh project with a twin `.bak`. `*.bak` recovery sidecars are gitignored. **Decision:** `scripts/` exists up-front (Unity-style) so the user sees where behavior scripts go before attaching the first one. **Decision:** the `ctkmaker.py` sidecar is kept byte-identical to the installed `CTkScript` source on every open — the file is declared machine-generated, so any mismatch (stale copy after an app update, or a stray user edit) is overwritten; edit-time autocomplete thus always shows the API the exporter will inline. User code belongs in `scripts/`. |
+| `script_paths.py` | path helpers | `<project>/scripts/` (CTkScript folder) resolution. |
+| `component_paths.py` | path helpers | `<project>/components/*.ctkcomp` resolution. |
+| `recent_files.py` | recent list | `~/.ctk_visual_builder/recent.json`. |
+| `settings.py` | settings | `~/.ctk_visual_builder/settings.json` (theme, editor, panel state). |
+| `paths.py`, `assets.py` | path / asset helpers | Project-relative asset resolution + token rewriting. |
+| `fonts.py`, `colors.py` | runtime helpers | Font registration + color utilities. |
+| `alignment.py`, `snap.py` | geometry | Multi-select alignment + snap-guide math. |
+| `platform_compat.py` | OS shims | Win32-specific helpers (work-area query, etc.). |
+| `screen.py` | DPI / monitor | Cached DPI factor (`get_dpi_factor`), primary monitor work-area + scale-aware `center_geometry`. Single source of truth for OS display metadata. CTk activates DPI awareness itself when `ctk.CTk` is instantiated. |
+| `logger.py` | logging | `log_error` to `~/.ctk_visual_builder/logs/`. |
+
+### `app/widgets/` — descriptors
+
+20 descriptor classes (19 widget types + `WindowDescriptor`, one file per type) registered via [registry.py](../../app/widgets/registry.py). Each declares schema, defaults, and runtime/export hooks. See [EXTENSION.md](EXTENSION.md) and [WIDGETS.md](WIDGETS.md).
+
+One cross-cutting registry sits next to the descriptors:
+
+| File | Purpose |
+|---|---|
+| [event_registry.py](../../app/widgets/event_registry.py) | Per-widget event definitions — `command` / `bind:<seq>` keys, human-readable labels, signatures. Drives the Properties panel Events group. |
+
+### `app/ui/` — interface
+
+| Group | Files | Purpose |
+|---|---|---|
+| **Main** | [main_window.py](../../app/ui/main_window.py), `main_menu.py`, `main_shortcuts.py`, `_main_window_host.py`, `project_window.py`, `palette.py`, `toolbar.py` | Root window — menu, alignment toolbar, widget palette, multi-project tab strip (multiple `.ctkproj` open at once), shortcut wiring. |
+| **Controllers** | `selection_controller.py`, `zoom_controller.py` | App-level coordinators outside `workspace/` — `SelectionController` runs the single / marquee / group state machine + bbox pool; `ZoomController` owns the canvas zoom factor + DPI rule + fit-to-window. |
+| **Workspace** | [workspace/](../../app/ui/workspace/) (`core.py`, `render.py`, `drag.py`, `widget_lifecycle.py`, `layout_overlay.py`, `chrome.py`, `controls.py`, `grid_drop_indicator.py`, `collapsed_tabs_bar.py`, `ghost_manager.py`) | Canvas — real CTk widgets via `Canvas.create_window`. `collapsed_tabs_bar.py` mounts a strip above the status bar listing minimised docs as click-to-restore chips. `ghost_manager.py` swaps an inactive doc's live widgets for a desaturated PIL screenshot on canvas (square-check icon on the chrome strip toggles it). |
+| **Properties** | [properties_panel/](../../app/ui/properties_panel/) (`panel.py`, `panel_commit.py`, `panel_schema.py`, `editors/*.py`, `overlays.py`, `drag_scrub.py`, `type_icons.py`, `format_utils.py`, `constants.py`, `property_help.py`, `tooltip.py`) | ttk.Treeview-based inspector with overlay editor widgets + label-column hover tooltips. |
+| **Floating panels** | `variables_window.py`, `object_tree_window.py`, `history_window.py`, `components_panel.py`, `console_window.py` | F11 / F8 / F10 docked panels + View → Console (in-app preview log). |
+| **Event binding** | [event_bind_menu.py](../../app/ui/event_bind_menu.py) | Shared dropdown helpers for the Properties-panel Events group + Workspace right-click cascade. `populate_target_only_menu` drives the Unity-style "pick target first, then function" flow; `populate_event_bind_menu` is the one-shot cascade used by quick-add surfaces. |
+| **Tool windows** | `widget_inspector_window.py`, `transitions_demo/` (package: `colors.py`, `constants.py`, `easings.py`, `tween.py`, `code_generators/`), `color_palette_window.py` | Tools menu. **Inspector** — widget schema (props + inherited methods) for any CTk class. **Transitions Demo** — 6 tabs (Button / Card / Text / Loaders / Popups / Toasts) with 25+ demos sharing one easing + duration control. Generate code exports a self-contained `.py` per demo (imports + easings + `Tween` engine + helpers + animation + `__main__` runner) via the `_assemble_module` builder; popups reuse a `_make_popup` preamble that includes the dark-titlebar `withdraw + deiconify` trick. **Color Palette** — designer reference: 15 named palettes (3 muted variants + black-mono + white-mono + 10 popular schemes — Material / Tailwind / Nord / Dracula / Gruvbox / Tokyo Night / Catppuccin / Solarized / Monokai / One Dark) × 9 colors. Click any swatch to copy hex. Window auto-fits content on first-ever open via `update_idletasks` + `winfo_reqheight` (hardcoded `default_size` is unreliable across DPI/font scaling); subsequent opens restore the user's last size as usual. |
+| **Dialogs** | `startup_dialog.py`, `splash.py`, `export_dialog.py`, `quick_export_dialog.py`, `save_as_dialog.py`, `new_project_form.py`, `settings_dialog.py`, `widget_picker_dialog.py`, `font_picker_dialog.py`, `image_picker_dialog.py`, `lucide_icon_picker_dialog.py`, `dialogs/cursor_advanced.py`, `bug_reporter.py`, `crash_dialog.py`, `handler_delete_dialogs.py`, 7× `component_*_dialog.py` | Modal flows. `bug_reporter.py` powers Help → Report a Bug (guided form → GitHub issue tracker or markdown export). `recent_list.py` is a list widget reused inside `startup_dialog.py` and `new_project_form.py`. `cursor_advanced.py` opens from the cursor property's "Advanced…" dropdown row — three tabs (Windows / macOS / Linux-X11) of OS-specific cursor names with live hover-preview; rows whose cursor name the host Tk rejects fall back to arrow + dim text. |
+| **Helpers** | `dialogs.py`, `dialog_utils.py`, `icons.py`, `system_fonts.py`, `dialogs/_base.py` | Shared dialog scaffolding (`safe_grab_set`, `prepare_dialog`/`reveal_dialog` alpha-hide pair) + icon loader + `ui_font` / `derive_ui_font` / `derive_mono_font` for cross-platform font kwargs (raw tk + ttk) + `DarkDialog` (`CTkToplevel` base for the raw-tk dialog family). Dark titlebar is now fork-side (`ctkmaker-core` `CTkToplevel`), no longer an app-level monkey-patch. |
+
+### `app/io/` — persistence + export
+
+| File | Purpose |
+|---|---|
+| `project_loader.py` | Load `.ctkproj` (v1→v2 migration on load; only `script_call` handler entries kept, legacy shapes dropped). |
+| `project_saver.py` | Save `.ctkproj`. |
+| `code_exporter/` | `.ctkproj` → runnable `.py` (per-window class). Package: `__init__.py` (main pipeline + filter / formatter / warning injection), `runtime_helpers.py`, `_utils.py`, `ctk_defaults.py`, `auto_trace_templates.py`, `preview_screenshot.py`. |
+| `scripts/` | CTkScript scanning + creation. Package: `ctk_script.py` (the `CTkScript` base class — source of truth, inlined into exports as the `ctkmaker.py` sidecar), `ast_scan.py` (`parse_ctkscript_classes`, `find_attachable_scripts`, `parse_handler_methods`, `parse_exposed_variables`), `components.py` (`script_call` resolution), `variable_fields.py` (`build_variable_rows` — Script Variables panel rows), `paths.py` (`create_user_script`), `editor.py` (open in editor), `_internals.py`. |
+| `library_scripts.py` | `write_package_markers_in` — seeds `__init__.py` markers into the build's copied `scripts/` tree at export time. |
+| `component_io.py`, `component_assets.py` | `.ctkcomp` zip pack/unpack with asset bundling. |
+
+## Entry points
+
+- [main.py:main()](../../main.py) — appearance mode, default color theme, `MainWindow()`, crash handlers (`_install_crash_handlers`), `mainloop()`. Font handling and the dark titlebar live fork-side (ctkmaker-core), not here.
+- [app/ui/main_window.py:MainWindow](../../app/ui/main_window.py) — instantiates a fresh `Project`, mounts UI, wires shortcuts, subscribes to events, optionally restores recent project.
+- [app/core/project.py:Project()](../../app/core/project.py) — empty project ready for `add_widget` / `load_from_dict`.
+
+## Lifecycle
+
+### Startup
+
+```
+main.py
+  → set_appearance_mode + theme
+  → MainWindow()
+        → withdraw + alpha=0 (hidden until project loads)
+        → SplashScreen (frameless logo + version + Loading...)
+        → mount UI panels (toolbar, palette, properties, ...)
+        → install shortcut bindings
+        → after(120): _show_startup_dialog
+              → StartupDialog (recent / new project picker)
+              → on_ready callback destroys splash at reveal
+              → user picks → MainWindow loads project → alpha=1
+  → install crash handlers (sys.excepthook + Tk.report_callback_exception)
+  → app.mainloop()
+```
+
+Every modal dialog (`ctk.CTkToplevel` and `tk.Toplevel` subclasses except crash_dialog) calls `prepare_dialog(self)` at the top of `__init__` (alpha=0) and `reveal_dialog(self)` after layout settles (force-paint + alpha=1). Centering paths that defer via `after(N, _center_on_parent)` call `reveal_dialog` at the end of the centering method so the window only becomes visible at its final position.
+
+### Edit cycle
+
+```
+User input (canvas drag, panel edit, shortcut, menu)
+  → UI handler builds a Command
+  → Command.do() mutates Project (model)
+  → Project.event_bus.publish(...) one or more events
+  → UI subscribers re-render (workspace, properties panel, object tree, etc.)
+  → History.push(Command) for undo/redo
+```
+
+### Save
+
+```
+Project.to_dict()
+  → json.dump → .ctkproj
+  + per-page assets/ folder kept in sync (image / font / icon)
+```
+
+Multi-page projects: each page is a separate `.ctkproj` under `<project>/assets/pages/`, with shared assets in `<project>/assets/{images,fonts,icons,components}/`, user scripts in a top-level `<project>/scripts/`, and a top-level `project.json`.
+
+### Export
+
+```
+Project (+ optional doc filter)
+  → app/io/code_exporter:export_project()
+  → per-window Python class
+  + import attached CTkScript classes from scripts/
+  + variable / handler (script_call) wiring
+  → runnable .py file (caller writes to disk, optional .zip bundle)
+```
+
+See [EXPORT.md](EXPORT.md).
+
+## Layer notes
+
+Two documented exceptions to the strict layering:
+
+1. **`app/core/autosave.py` and `app/core/project_folder.py` import from `app/io/project_saver.py`.** Autosave reuses the same serialization path as the disk save flow. `app/io/` here means *file I/O helpers*, not *upper layer*.
+2. **`app/widgets/card.py` calls `app/io/code_exporter._path_for_export`** for image asset path resolution at export time. Stable contract; treat the function as semi-public.
+
+## File-size landmarks
+
+| File | Lines | Note |
+|---|---|---|
+| `app/io/code_exporter/__init__.py` | 2,900 | Main export pipeline — class emission, handler wiring, missing-binding warnings. Package now (was single file pre-v1.36); split planned post-v1.0. |
+| `app/ui/properties_panel/panel.py` | 2,100 | Panel base + tree management + event-binding popups (target / function pickers, param edit) |
+| `app/core/project.py` | 1,950 | God-class by design — public API surface |
+| `app/ui/properties_panel/panel_schema.py` | 1,850 | Schema-to-tree population — incl. Unity-style event-row block (parent = target, Function child, param children) + per-script `(Script)` variable groups |
+| `app/ui/properties_panel/panel_commit.py` | 1,070 | Commit pipeline + click routing (param edit dispatch) |
+
+These are intentionally large. Every one has a multi-paragraph module-level docstring explaining structure.
+
+## Mixin pattern
+
+`MainWindow(ShortcutsMixin, MenuMixin, FilesMixin, DocumentsMixin, PreviewMixin, WindowsMixin, ActionsMixin, ctk.CTk)` and `PropertiesPanel(CommitMixin, SchemaMixin, ctk.CTkFrame)` — the largest UI classes are composed across files via mixins (`main_shortcuts.py`, `main_menu.py`, `main_files.py`, `main_documents.py`, `main_preview.py`, `main_windows.py`, `main_actions.py`). Look for the matching mixin files / `_main_window_host.py` when reading the main class.
+
+## Runtime widget overrides
+
+[`app/widgets/runtime/`](../../app/widgets/runtime/) — pure-Python subclasses of CTk widgets that work around CTk / Tk behaviors not reachable from the schema. Each module is standalone (no CTkMaker imports) so [`code_exporter`](../../app/io/code_exporter/__init__.py) inlines its source verbatim into generated `.py` files; the same fix applies to preview and exported scripts.
+
+| Override | Fixes |
+|---|---|
+| [`CircularProgress`](../../app/widgets/runtime/circular_progress.py) | Custom ring-style progress widget — not present in `customtkinter`. |
+
+`CircularProgress` is the only remaining runtime override — every CTk-widget crutch has migrated into the ctkmaker-core fork. CTkLabel's old `CircleLabel` override (full-circle layout + unified `bind()` event routing) is now the fork's native `full_circle` / `unified_bind` kwargs (ctkmaker-core ≥ 5.4.14), injected by `CTkLabelDescriptor`. The Image descriptor emits a plain `ctk.CTkLabel(...)` without those kwargs.
+
+## Conventions
+
+- **Identifiers:** UUID strings for `WidgetNode.id`, `Document.id`, `VariableEntry.id`. Stable across save/load.
+- **Tokens:** `var:<uuid>` for variable bindings in property values. Resolved at runtime + export.
+- **Asset references:** `asset:<kind>/<filename>` (e.g. `asset:icons/save.png`). Resolved against the active project folder.
+- **Names vs IDs:** Display names are user-mutable and not unique. IDs are stable. Generated code uses sanitized names; collisions resolved with `<type>_<N>` fallback.
+- **Schema versioning:** `.ctkproj` carries `"version"` field. v1 → v2 migration runs on load. Future migrations chain on top.
+
+## Per-user state
+
+Lives in `~/.ctk_visual_builder/` (path NOT renamed during the v0.18.3 product rename, intentional — preserves existing settings):
+
+- `settings.json` — theme, editor preference, panel state
+- `recent.json` — recent project paths
+- `logs/` — `log_error` output (one file per session)

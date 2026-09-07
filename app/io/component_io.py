@@ -1,0 +1,680 @@
+"""Read / write ``.ctkcomp`` files — saved widget bundles per project.
+
+A ``.ctkcomp`` is a ZIP archive holding a single ``component.json``
+payload plus flat copies of any referenced asset files under
+``assets/<archive_name>`` (written by ``write_assets_into_zip``).
+
+Schema (v2):
+    {
+      "schema_version": 2,
+      "type": "fragment" | "window",
+      "name": "Login Card",
+      "author": "",
+      "created_at": "2026-04-30T12:00:00",
+      "ctk_maker_version": "1.3.1",
+      "view_size": {"w": 320, "h": 240},
+      "nodes": [ /* WidgetNode dicts */ ],
+      "variables": [ /* {id, name, type, default} */ ],
+      "assets": [ /* manifest (id + size) for the assets/* members */ ]
+    }
+
+Variable bundling: every resolvable ``var:<uuid>`` token (local OR
+global) joins the bundle. On insert, all bundled vars land in the
+target Window's local namespace (globals get demoted to locals so
+the component is portable). Deleted-var tokens drop silently.
+"""
+
+from __future__ import annotations
+
+import datetime
+import json
+import uuid
+import zipfile
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+from app.core.component_paths import COMPONENT_EXT  # noqa: F401
+from app.core.logger import log_error
+from app.core.variables import (
+    is_var_token, make_var_token, parse_var_token,
+)
+from app.core.widget_node import WidgetNode
+from app.io.component_assets import (
+    PROJECT_COMPONENTS_DIRNAME,
+    collect_assets_from_nodes,
+    count_assets_in_nodes,
+    extract_assets_to_folder,
+    pick_unique_component_folder,
+    rewrite_bundle_tokens_to_paths,
+    rewrite_image_props_to_bundle_tokens,
+    slugify_component_name,
+    write_assets_into_zip,
+)
+
+if TYPE_CHECKING:
+    from app.core.document import Document
+    from app.core.project import Project
+    from app.core.variables import VariableEntry
+
+SCHEMA_VERSION = 2
+PAYLOAD_FILENAME = "component.json"
+
+TYPE_FRAGMENT = "fragment"
+TYPE_WINDOW = "window"
+
+
+# ---------------------------------------------------------------------------
+# Save
+# ---------------------------------------------------------------------------
+def save_fragment(
+    target_path: Path,
+    name: str,
+    nodes: list[WidgetNode],
+    project: "Project",
+    source_window_id: str | None,
+    author: str = "",
+) -> None:
+    """Write the given root WidgetNodes as a ``.ctkcomp`` zip at
+    ``target_path``. ``source_window_id`` is the Document id the
+    selection came from (used as a hint; bundling treats local + global
+    bindings the same way regardless). ``author`` is a free-form
+    user-typed name stored in the payload — empty allowed.
+    """
+    snapshots, var_bundle = _process_nodes_for_save(
+        nodes, project, source_window_id,
+    )
+    project_file = getattr(project, "path", None)
+    asset_map = collect_assets_from_nodes(snapshots, project_file)
+    rewrite_image_props_to_bundle_tokens(snapshots, asset_map, project_file)
+    view_size = _compute_view_size(nodes)
+    try:
+        from app import __version__ as app_version
+    except ImportError:
+        app_version = "unknown"
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "type": TYPE_FRAGMENT,
+        "name": name,
+        "author": author,
+        "created_at": datetime.datetime.now().isoformat(timespec="seconds"),
+        "ctk_maker_version": app_version,
+        "view_size": {"w": view_size[0], "h": view_size[1]},
+        "nodes": snapshots,
+        "variables": var_bundle,
+        "assets": [],
+    }
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(
+        target_path, "w", compression=zipfile.ZIP_DEFLATED,
+    ) as zf:
+        manifest = write_assets_into_zip(zf, asset_map)
+        payload["assets"] = manifest
+        zf.writestr(
+            PAYLOAD_FILENAME,
+            json.dumps(payload, indent=2, ensure_ascii=False),
+        )
+
+
+def count_assets_to_bundle(
+    nodes: list[WidgetNode], project: "Project",
+) -> tuple[int, int]:
+    """Count + total bytes of asset files the given fragment would
+    bundle. Surfaced by the Save dialog hint.
+    """
+    snapshots = [n.to_dict() for n in nodes]
+    project_file = getattr(project, "path", None)
+    return count_assets_in_nodes(snapshots, project_file)
+
+
+def save_window(
+    target_path: Path,
+    name: str,
+    document,
+    project: "Project",
+    author: str = "",
+) -> None:
+    """Write the entire document (root widgets + window properties +
+    full local variable list) as a window-type ``.ctkcomp``. Even a
+    main-window source becomes ``is_toplevel=True`` in the payload so
+    every insert lands as a Toplevel — projects only ever have one
+    main window, dialogs are the natural reusable shape.
+    """
+    snapshots = [w.to_dict() for w in document.root_widgets]
+    # Phase 2: strip handler bindings recursively (same reason as in
+    # ``_process_nodes_for_save`` — the fragment path goes through
+    # that helper, the window path doesn't).
+    for snap in snapshots:
+        _strip_handlers_recursive(snap)
+    project_file = getattr(project, "path", None)
+    asset_map = collect_assets_from_nodes(snapshots, project_file)
+    rewrite_image_props_to_bundle_tokens(snapshots, asset_map, project_file)
+    # Local variables travel as full entries (id / name / type /
+    # default), not just the bindings the fragment flow bundles. The
+    # whole window's local namespace is preserved.
+    locals_payload = [
+        {
+            "id": v.id,
+            "name": v.name,
+            "type": v.type,
+            "default": v.default,
+        }
+        for v in getattr(document, "local_variables", [])
+    ]
+    try:
+        from app import __version__ as app_version
+    except ImportError:
+        app_version = "unknown"
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "type": TYPE_WINDOW,
+        "name": name,
+        "author": author,
+        "created_at": datetime.datetime.now().isoformat(timespec="seconds"),
+        "ctk_maker_version": app_version,
+        "view_size": {
+            "w": int(document.width), "h": int(document.height),
+        },
+        "is_toplevel": True,
+        "window_properties": dict(document.window_properties),
+        "description": document.description or "",
+        "nodes": snapshots,
+        "variables": locals_payload,
+        "assets": [],
+    }
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(
+        target_path, "w", compression=zipfile.ZIP_DEFLATED,
+    ) as zf:
+        manifest = write_assets_into_zip(zf, asset_map)
+        payload["assets"] = manifest
+        zf.writestr(
+            PAYLOAD_FILENAME,
+            json.dumps(payload, indent=2, ensure_ascii=False),
+        )
+
+
+def count_window_assets(document, project: "Project") -> tuple[int, int]:
+    """Asset count + total bytes for a whole-window save. Same shape
+    as ``count_assets_to_bundle`` but takes a Document instead of an
+    explicit node list.
+    """
+    snapshots = [w.to_dict() for w in document.root_widgets]
+    project_file = getattr(project, "path", None)
+    return count_assets_in_nodes(snapshots, project_file)
+
+
+def _repack_with_payload(target_path: Path, new_payload: dict) -> None:
+    """Rewrite ``target_path`` so it holds ``new_payload`` as its
+    ``component.json`` while preserving every other archive entry
+    (notably ``assets/*``). Without preserving them, opening the zip
+    in ``"w"`` mode truncates the file and the bundled images are
+    lost on every author/publish rewrite.
+    """
+    other_entries: list[tuple[zipfile.ZipInfo, bytes]] = []
+    try:
+        with zipfile.ZipFile(target_path, "r") as zf_in:
+            for info in zf_in.infolist():
+                if info.filename == PAYLOAD_FILENAME:
+                    continue
+                with zf_in.open(info) as fh:
+                    other_entries.append((info, fh.read()))
+    except (OSError, zipfile.BadZipFile):
+        log_error(f"component repack read {target_path}")
+        return
+    with zipfile.ZipFile(
+        target_path, "w", compression=zipfile.ZIP_DEFLATED,
+    ) as zf_out:
+        zf_out.writestr(
+            PAYLOAD_FILENAME,
+            json.dumps(new_payload, indent=2, ensure_ascii=False),
+        )
+        for info, data in other_entries:
+            # Copy the original ZipInfo so per-entry compression /
+            # timestamps survive the repack.
+            zf_out.writestr(info, data)
+
+
+def rewrite_payload_author(target_path: Path, author: str) -> None:
+    """Repack a ``.ctkcomp`` with an updated ``author`` field — used
+    by the Personal export dialog. Bundled assets are preserved.
+    """
+    payload = load_payload(target_path)
+    if payload is None:
+        return
+    payload["author"] = author
+    _repack_with_payload(target_path, payload)
+
+
+def rewrite_payload_for_publish(
+    target_path: Path,
+    author: str,
+    license_block: dict,
+    category: str,
+    description: str,
+) -> None:
+    """Repack a ``.ctkcomp`` with publish-time fields: updated
+    ``author``, an immutable ``license`` block, ``category``, and
+    ``description``. Bundled assets are preserved.
+    """
+    payload = load_payload(target_path)
+    if payload is None:
+        return
+    payload["author"] = author
+    payload["license"] = license_block
+    payload["category"] = category
+    payload["description"] = description
+    _repack_with_payload(target_path, payload)
+
+
+def count_bindings_to_bundle(
+    nodes: list[WidgetNode],
+    project: "Project",
+) -> int:
+    """How many ``var:<uuid>`` bindings will travel with the component.
+    Resolvable bindings (local + global) all bundle as locals on the
+    target Window; deleted-var tokens are uncountable here and just
+    get dropped silently on save.
+    """
+    seen: set[str] = set()
+
+    def walk(node_dict: dict) -> None:
+        for value in node_dict.get("properties", {}).values():
+            var_id = parse_var_token(value)
+            if var_id is None:
+                continue
+            if project.find_document_for_variable(var_id) is not None:
+                seen.add(var_id)
+                continue
+            for v in project.variables:
+                if v.id == var_id:
+                    seen.add(var_id)
+                    break
+        for child in node_dict.get("children", []):
+            walk(child)
+
+    for node in nodes:
+        walk(node.to_dict())
+    return len(seen)
+
+
+def _resolve_var_for_bundle(
+    project: "Project", var_id: str,
+) -> "VariableEntry | None":
+    owner = project.find_document_for_variable(var_id)
+    if owner is not None:
+        for v in owner.local_variables:
+            if v.id == var_id:
+                return v
+    for v in project.variables:
+        if v.id == var_id:
+            return v
+    return None
+
+
+def _process_nodes_for_save(
+    nodes: list[WidgetNode],
+    project: "Project",
+    source_window_id: str | None,
+) -> tuple[list[dict], list[dict]]:
+    """Single recursive walk that produces cleaned node snapshots and
+    the variable bundle. Every resolvable ``var:<uuid>`` token —
+    whether local or global at source — joins the bundle as a local
+    var (insert promotes them to the target Window's namespace).
+    Deleted-var tokens drop silently.
+    """
+    bundle: dict[str, dict] = {}
+
+    def process(node_dict: dict) -> dict:
+        cleaned: dict = {}
+        for key, value in node_dict.get("properties", {}).items():
+            var_id = parse_var_token(value)
+            if var_id is None:
+                cleaned[key] = value
+                continue
+            entry = _resolve_var_for_bundle(project, var_id)
+            if entry is None:
+                continue
+            if var_id not in bundle:
+                bundle[var_id] = {
+                    "id": entry.id,
+                    "name": entry.name,
+                    "type": entry.type,
+                    "default": entry.default,
+                }
+            cleaned[key] = value
+        node_dict["properties"] = cleaned
+        # Phase 2 visual scripting: strip event handler bindings on
+        # save. Components stay self-contained — they never carry a
+        # reference to a method that lives in the source project's
+        # ``scripts/<page>.py``. Mirrors the v1.0 prefab var-strip
+        # behaviour: bindings inside a shared snippet are
+        # source-project-only, the user re-adds them after drop.
+        node_dict.pop("handlers", None)
+        node_dict["children"] = [
+            process(c) for c in node_dict.get("children", [])
+        ]
+        return node_dict
+
+    snapshots = [process(n.to_dict()) for n in nodes]
+    return snapshots, list(bundle.values())
+
+
+def _strip_handlers_recursive(node_dict: dict) -> None:
+    """In-place: drop ``handlers`` from this node and every descendant.
+    Used by ``save_window`` (the fragment flow strips inline inside
+    ``_process_nodes_for_save``).
+    """
+    node_dict.pop("handlers", None)
+    for child in node_dict.get("children", []):
+        if isinstance(child, dict):
+            _strip_handlers_recursive(child)
+
+
+def _compute_view_size(nodes: list[WidgetNode]) -> tuple[int, int]:
+    if not nodes:
+        return (0, 0)
+    max_x = max_y = 0
+    for n in nodes:
+        x = int(n.properties.get("x", 0) or 0)
+        y = int(n.properties.get("y", 0) or 0)
+        w = int(n.properties.get("width", 0) or 0)
+        h = int(n.properties.get("height", 0) or 0)
+        max_x = max(max_x, x + w)
+        max_y = max(max_y, y + h)
+    return (max_x, max_y)
+
+
+# ---------------------------------------------------------------------------
+# Load
+# ---------------------------------------------------------------------------
+def load_payload(path: Path) -> dict | None:
+    """Read the full ``component.json``. Returns ``None`` on failure."""
+    try:
+        with zipfile.ZipFile(path, "r") as zf:
+            with zf.open(PAYLOAD_FILENAME) as fh:
+                return json.load(fh)
+    except (OSError, KeyError, zipfile.BadZipFile, json.JSONDecodeError):
+        log_error(f"component load {path}")
+        return None
+
+
+def load_metadata(path: Path) -> dict | None:
+    payload = load_payload(path)
+    if payload is None:
+        return None
+    view_size = payload.get("view_size") or {}
+    return {
+        "type": payload.get("type", TYPE_FRAGMENT),
+        "is_window": payload.get("type") == TYPE_WINDOW,
+        "name": payload.get("name", path.stem),
+        "author": payload.get("author", ""),
+        "created_at": payload.get("created_at", ""),
+        "view_w": int(view_size.get("w", 0) or 0),
+        "view_h": int(view_size.get("h", 0) or 0),
+        "node_types": _summarise_node_types(payload.get("nodes", [])),
+        "license": payload.get("license"),
+    }
+
+
+def _summarise_node_types(node_dicts: list[dict]) -> list[str]:
+    return [n.get("widget_type", "?") for n in node_dicts]
+
+
+# ---------------------------------------------------------------------------
+# Variable conflict resolution
+# ---------------------------------------------------------------------------
+@dataclass
+class VarConflict:
+    """A bundled variable whose name already exists in the target
+    Window with a different type. The user picks Rename or Skip via
+    the conflict dialog; the chosen resolution is written back into
+    this object before ``apply_var_resolutions`` runs.
+    """
+    bundle: dict
+    existing_id: str
+    existing_type: str
+    resolution: str = "rename"   # "rename" | "skip"
+    new_name: str = ""
+
+
+@dataclass
+class VarPlan:
+    auto: list[dict] = field(default_factory=list)
+    conflicts: list[VarConflict] = field(default_factory=list)
+
+
+def analyze_var_conflicts(
+    payload: dict, target_window: "Document",
+) -> VarPlan:
+    """Classify each bundled variable against the target Window's
+    locals: ``reuse`` (full match), ``create`` (no name match), or
+    ``conflict`` (same name, different type — needs the dialog).
+    """
+    plan = VarPlan()
+    for bundle in payload.get("variables", []):
+        existing = _find_local_by_name(target_window, bundle.get("name", ""))
+        if existing is None:
+            plan.auto.append({"bundle": bundle, "action": "create"})
+        elif existing.type == bundle.get("type"):
+            plan.auto.append({
+                "bundle": bundle,
+                "action": "reuse",
+                "existing_id": existing.id,
+            })
+        else:
+            plan.conflicts.append(VarConflict(
+                bundle=bundle,
+                existing_id=existing.id,
+                existing_type=existing.type,
+                new_name=bundle.get("name", "") + "_2",
+            ))
+    return plan
+
+
+def _find_local_by_name(window, name: str):
+    for v in window.local_variables:
+        if v.name == name:
+            return v
+    return None
+
+
+def apply_var_resolutions(
+    project: "Project",
+    target_window: "Document",
+    plan: VarPlan,
+) -> dict[str, str | None]:
+    """Materialise the plan: reuse existing UUIDs, create new locals
+    for fresh names, honour Rename / Skip on the conflicts. Returns
+    ``{old_uuid: new_uuid_or_None}``. ``None`` means the binding was
+    skipped — ``_rewrite_var_tokens`` will drop the token entirely.
+    """
+    uuid_map: dict[str, str | None] = {}
+    for entry in plan.auto:
+        bundle = entry["bundle"]
+        if entry["action"] == "reuse":
+            uuid_map[bundle["id"]] = entry["existing_id"]
+        else:
+            new_var = project.add_variable(
+                name=bundle["name"],
+                var_type=bundle.get("type", "str"),
+                default=bundle.get("default", ""),
+                scope="local",
+                document_id=target_window.id,
+            )
+            uuid_map[bundle["id"]] = new_var.id
+    for conflict in plan.conflicts:
+        bundle = conflict.bundle
+        if conflict.resolution == "skip":
+            uuid_map[bundle["id"]] = None
+            continue
+        new_var = project.add_variable(
+            name=conflict.new_name,
+            var_type=bundle.get("type", "str"),
+            default=bundle.get("default", ""),
+            scope="local",
+            document_id=target_window.id,
+        )
+        uuid_map[bundle["id"]] = new_var.id
+    return uuid_map
+
+
+# ---------------------------------------------------------------------------
+# Instantiate
+# ---------------------------------------------------------------------------
+def instantiate_fragment(
+    payload: dict,
+    drop_offset: tuple[int, int],
+    var_uuid_map: dict[str, str | None] | None = None,
+    asset_extracted_map: dict[str, Path] | None = None,
+) -> list[WidgetNode]:
+    """Build live ``WidgetNode`` trees from a component payload.
+    ``asset_extracted_map`` supplies the on-disk paths for every
+    bundle token, produced by ``extract_component_assets`` before
+    this call.
+    """
+    nodes: list[WidgetNode] = []
+    dx, dy = drop_offset
+    raw_nodes = list(payload.get("nodes", []))
+    if asset_extracted_map is not None:
+        rewrite_bundle_tokens_to_paths(raw_nodes, asset_extracted_map)
+    for raw in raw_nodes:
+        if var_uuid_map is not None:
+            _rewrite_var_tokens(raw, var_uuid_map)
+        node = WidgetNode.from_dict(raw)
+        _reassign_ids(node)
+        if dx or dy:
+            node.properties["x"] = int(node.properties.get("x", 0) or 0) + dx
+            node.properties["y"] = int(node.properties.get("y", 0) or 0) + dy
+        nodes.append(node)
+    return nodes
+
+
+def instantiate_window_document(
+    payload: dict,
+    project,
+    target_name: str,
+    asset_extracted_map: dict[str, Path] | None = None,
+) -> tuple[object, list[WidgetNode]]:
+    """Build a fresh ``Document`` from a window-type component
+    payload. Returns ``(new_doc, root_nodes)``: the document carries
+    name + size + window properties + local variables, but its
+    ``root_widgets`` list is **empty** because the caller is expected
+    to register every root tree through ``project.add_widget`` so
+    each node fires the ``widget_added`` event the workspace renderer
+    needs to build its tk widget. The returned ``root_nodes`` list
+    is detached and ready for that pass.
+    """
+    from app.core.document import Document
+    from app.core.variables import VAR_TYPES, VariableEntry
+    width = int((payload.get("view_size") or {}).get("w", 800) or 800)
+    height = int((payload.get("view_size") or {}).get("h", 600) or 600)
+    window_properties = payload.get("window_properties") or {}
+    new_doc = Document(
+        name=target_name,
+        width=width,
+        height=height,
+        window_properties=dict(window_properties),
+        is_toplevel=True,
+    )
+    description = payload.get("description") or ""
+    if description:
+        new_doc.description = description
+    # Local variables: every entry in the payload becomes a fresh
+    # local with a new UUID. The uuid_map lets us rewrite var tokens
+    # in the widget tree below.
+    var_uuid_map: dict[str, str | None] = {}
+    for entry in payload.get("variables", []):
+        old_id = entry.get("id")
+        if not old_id:
+            continue
+        var_type = entry.get("type", "str")
+        if var_type not in VAR_TYPES:
+            var_type = "str"
+        new_var = VariableEntry(
+            name=entry.get("name", "var"),
+            type=var_type,
+            default=entry.get("default", ""),
+            scope="local",
+        )
+        new_doc.local_variables.append(new_var)
+        var_uuid_map[old_id] = new_var.id
+    raw_nodes = list(payload.get("nodes", []))
+    if asset_extracted_map is not None:
+        rewrite_bundle_tokens_to_paths(raw_nodes, asset_extracted_map)
+    root_nodes: list[WidgetNode] = []
+    for raw in raw_nodes:
+        if var_uuid_map:
+            _rewrite_var_tokens(raw, var_uuid_map)
+        node = WidgetNode.from_dict(raw)
+        _reassign_ids(node)
+        root_nodes.append(node)
+    return new_doc, root_nodes
+
+
+def extract_component_assets(
+    component_path: Path,
+    target_project_file,
+    component_display_name: str,
+) -> tuple[dict[str, Path], Path | None]:
+    """Open the ``.ctkcomp`` and extract its assets into a fresh
+    folder under the target project's ``assets/components/<slug>/``.
+    Slug auto-suffixes (``_2``, ``_3``…) when the folder is taken so
+    multiple inserts of the same component never collide.
+
+    Returns ``(extracted_map, folder_path)``. When the target project
+    is unsaved or the bundle has no assets, returns ``({}, None)`` —
+    callers treat any leftover bundle tokens as broken on rewrite.
+    """
+    if target_project_file is None:
+        return {}, None
+    from app.core.assets import project_assets_dir
+    assets_root = project_assets_dir(target_project_file)
+    if assets_root is None:
+        return {}, None
+    components_root = assets_root / PROJECT_COMPONENTS_DIRNAME
+    components_root.mkdir(parents=True, exist_ok=True)
+    base_slug = slugify_component_name(component_display_name)
+    target_folder = pick_unique_component_folder(components_root, base_slug)
+    try:
+        with zipfile.ZipFile(component_path, "r") as zf:
+            extracted = extract_assets_to_folder(zf, target_folder)
+    except (OSError, zipfile.BadZipFile):
+        log_error(f"component_io extract_assets {component_path}")
+        return {}, None
+    if not extracted:
+        # Nothing to extract — clean up the empty folder we created
+        # so the project's components/ stays tidy.
+        try:
+            target_folder.rmdir()
+        except OSError:
+            pass
+        return {}, None
+    return extracted, target_folder
+
+
+def _rewrite_var_tokens(
+    node_dict: dict, uuid_map: dict[str, str | None],
+) -> None:
+    cleaned: dict = {}
+    for key, value in node_dict.get("properties", {}).items():
+        if not is_var_token(value):
+            cleaned[key] = value
+            continue
+        var_id = parse_var_token(value)
+        if var_id not in uuid_map:
+            cleaned[key] = value
+            continue
+        new_id = uuid_map[var_id]
+        if new_id is None:
+            continue
+        cleaned[key] = make_var_token(new_id)
+    node_dict["properties"] = cleaned
+    for child in node_dict.get("children", []):
+        _rewrite_var_tokens(child, uuid_map)
+
+
+def _reassign_ids(node: WidgetNode) -> None:
+    node.id = str(uuid.uuid4())
+    for child in node.children:
+        _reassign_ids(child)

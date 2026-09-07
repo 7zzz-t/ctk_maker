@@ -1,0 +1,54 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ctkmaker"
+version = "1.66.0"
+description = "A free, professional visual UI designer for CustomTkinter — drag-and-drop canvas, multi-document workspace, asset system (fonts / images / 1700+ Lucide icons), enhanced and original widgets, and clean Python code export."
+readme = "PYPI_README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [
+    { name = "Lasha Kandelaki", email = "kandelucky.dev@gmail.com" }
+]
+keywords = [
+    "customtkinter",
+    "ctk",
+    "tkinter",
+    "gui",
+    "ui-builder",
+    "visual-designer",
+    "drag-and-drop",
+    "wysiwyg",
+    "python-gui",
+    "rad-tool"
+]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: User Interfaces",
+    "Topic :: Software Development :: Build Tools",
+]
+dependencies = [
+    "ctkmaker-core>=5.5.1",
+    "Pillow>=10.0.0",
+    "Send2Trash>=1.8.0",
+]
+
+[project.scripts]
+ctkmaker = "ctkmaker:main"
+
+[project.urls]
+Homepage = "https://github.com/kandelucky/ctk_maker"
+Repository = "https://github.com/kandelucky/ctk_maker"
+Issues = "https://github.com/kandelucky/ctk_maker/issues"
+
+[tool.setuptools]
+packages = ["ctkmaker"]

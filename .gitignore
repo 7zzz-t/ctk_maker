@@ -1,0 +1,114 @@
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+.Python
+build/
+dist/
+*.egg-info/
+*.egg
+
+.venv/
+venv/
+env/
+ENV/
+
+.vscode/
+.idea/
+.obsidian/
+.claude/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+*.log
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Auto-generated — regenerate via tools/gen_architecture_dashboard.py
+docs/architecture_dashboard.html
+docs/architecture_graph.dot
+docs/architecture_graph.svg
+
+# Test artifacts
+tools/_test_alpha.png
+test_grid_drag.py
+
+# Local-only test / experiment scripts (not shipped)
+test_scripts/
+
+# Personal task list — kept local only
+TODO.md
+
+# Plan / design notes — local only by default. export_test_plan.md was
+# tracked pre-rule and stays tracked until removed explicitly; other
+# plans live local (finished / obsolete ones under docs/plans/archive/).
+docs/plans/
+
+# Tutorial drafts — local only until ready to publish.
+docs/tutorials/
+
+# External reference material — run tools/fetch_ctk_reference.py to get it
+reference/ctk_official/
+
+# Developer-only tooling and notes (not shipped)
+docs/architecture/
+docs/module_descriptions.ka.json
+docs/New folder/
+tools/ctk_examples/
+tools/fetch_ctk_reference.py
+tools/gen_architecture_dashboard.py
+tools/gen_architecture_graph.py
+tools/test_transparent_png.py
+tools/test_icon_picker.py
+tools/test_output/
+
+# PyInstaller build artifacts (Phase 3 distribution)
+*.spec
+*.manifest
+
+# Inno Setup installer output
+installer/Output/
+*Setup.exe
+CTkMaker-*.exe
+
+# pip build leftovers
+.eggs/
+pip-wheel-metadata/
+pip-log.txt
+
+# CTkMaker user projects accidentally saved at repo root
+# (root-only — test fixtures in WidgetCatalog/ or tests/fixtures/ stay tracked)
+/*.ctkproj
+/*.ctkcomp
+/*.ctkproj.zip
+/*.ctkcomp.zip
+
+# F5 preview leftovers (if ever placed in repo)
+preview_*.py
+__preview__/
+
+# Pytest coverage
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# Merge / edit residue
+*.bak
+*.orig
+*.rej
+
+# AI editor artifacts (currently only .claude/ tracked)
+.cursor/
+.cursorrules
+.aider*
+.windsurfrules
+
+# Python version managers
+.python-version
+.tool-versions
+.envrc

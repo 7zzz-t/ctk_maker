@@ -1,0 +1,330 @@
+# CTkMaker — AI Cheatsheet
+
+Distilled reference for prompting an AI to work with a CTkMaker project. Paste into an AI chat as a system message, then describe what you want built.
+
+For full reference: [CONCEPTS.md](CONCEPTS.md), [WIDGETS.md](WIDGETS.md), [DATA_MODEL.md](DATA_MODEL.md), [EXPORT.md](EXPORT.md).
+
+## What CTkMaker is
+
+A visual designer for [CustomTkinter](https://github.com/TomSchimansky/CustomTkinter) Python GUIs. Users drag widgets onto a canvas, edit properties, attach event handlers, and export to runnable `.py` code. Visual design lives in `.ctkproj` files; behavior lives in `CTkScript` classes in a top-level `scripts/` folder.
+
+## CustomTkinter is editable — this is a fork
+
+CTkMaker runs on **[ctkmaker-core](https://github.com/kandelucky/ctkmaker-core)** — a CustomTkinter fork at `c:/Users/likak/Desktop/ctkmaker_core/` (editable install). `import customtkinter` in ctk_maker source resolves to the fork's `customtkinter/` folder directly.
+
+**Design axis — export cleanliness.** The fork exists to keep exported `.py` scripts clean. **Anything an exported CTkMaker script needs at runtime lives in the fork** — runtime widget classes, runtime helpers, monkey-patches, font registration. Exports `import customtkinter` and reach those APIs natively, instead of CTkMaker inlining them via `inspect.getsource` or string-literal emission.
+
+**When adding a new runtime entity (widget, helper) for CTkMaker:**
+
+1. Does exported code use it at runtime? → **fork**, at `customtkinter/windows/widgets/ctk_<name>.py` or `customtkinter/contrib/`. Then a CTkMaker descriptor (`app/widgets/ctk_<name>.py`) wraps it.
+2. Editor-only (selection state, canvas drag, undo, statusbar tooltip)? → **stays in `app/`**
+3. Property name translation at export time (`border_enabled` → `border_width=0`)? → **stays in the exporter**
+
+**When a CustomTkinter bug or missing feature blocks ctkmaker work:**
+1. Fix it in the fork (`Desktop/ctkmaker_core/customtkinter/...`)
+2. Test against ctk_maker — editable install picks up changes live
+3. Ship: commit + tag `ctkmaker-core-vX.Y.Z` + PyPI publish
+4. Bump `ctk_maker/requirements.txt` if minimum version needs raising
+
+**Do not** write monkey-patches, helper wrappers, or runtime workaround layers in `app/` for things exported code uses. `app/widgets/runtime/` should hold editor-only behavior (selection state, canvas integration), not new widgets or runtime helpers that exports will then have to inline.
+
+## Project layout
+
+```
+MyProject/
+├── project.json                          page list, project name
+├── ctkmaker.py                           CTkScript base sidecar (auto-written, re-synced on open; don't edit)
+├── requirements.txt, pyrightconfig.json  editor scaffolding (auto-written; pyrightconfig is per-machine + gitignored)
+├── scripts/<name>.py                     your CTkScript classes (you own this folder)
+├── components/*.ctkcomp                  reusable widget bundles (zip)
+└── assets/
+    ├── pages/<page>.ctkproj              per-page design (one window or more)
+    └── images/, fonts/, icons/           shared assets
+```
+
+A **Page** is one `.ctkproj` (one screen — login, dashboard, settings, ...).
+A **Window** lives inside a page — exactly one Main Window (`ctk.CTk`) plus zero or more Dialogs (`ctk.CTkToplevel`).
+
+## Hierarchy
+
+```
+Project → has → Pages → has → Windows → has → Widgets (nested tree)
+                                          → has → Variables (local)
+       → has → Variables (global)
+       → has → Scripts (CTkScript classes attached to widgets/windows)
+```
+
+## Widgets — quick list
+
+22 palette widgets across 5 groups (Display, Controls, Containers, Layouts, Indicators). See [WIDGETS.md](WIDGETS.md) for full property tables.
+
+| Widget | Use for |
+|---|---|
+| `CTkButton` | Click action |
+| `CTkLabel` | Static text + optional image |
+| `CTkRichLabel` | Markdown-like / XML-style formatted text |
+| `CTkEntry` | Single-line text input |
+| `CTkTextbox` | Multi-line text |
+| `CTkCheckBox`, `CTkSwitch`, `CTkRadioButton` | Boolean / choice |
+| `CTkSegmentedButton` | Multi-state choice |
+| `CTkSlider` | Numeric drag |
+| `CTkProgressBar`, `CircularProgress` | Visual progress |
+| `CTkComboBox`, `CTkOptionMenu` | Dropdown |
+| `CTkFrame`, `CTkScrollableFrame`, `CTkTabview` | Containers |
+| `Card` | Styled container (rounded / circle, with embedded image) |
+| `Image` | Image as a label |
+
+## Common widget properties
+
+Every widget has: `x`, `y`, `width`, `height` (in pixels — for `place` layout), `name` (used as the variable name in export when valid identifier). Then type-specific:
+
+| Widget | Key property | Common extras |
+|---|---|---|
+| Button | `text`, `command` | `fg_color`, `hover_color`, `corner_radius`, `image`, `compound` |
+| Label | `text` | `font_*`, `text_color` / `text_color_disabled`, `corner_radius`, `image` / `compound`, `anchor`, `padx` / `pady`, `label_enabled`, `cursor`, `takefocus`, `fg_color` / `bg_color` |
+| Entry | `placeholder_text`, `initial_value` | `font_*`, `width`, `show` (password) |
+| Textbox | `initial_text` | `wrap`, font props |
+| Slider | `from_`, `to`, `initial_value` | `orientation`, `number_of_steps` |
+| Switch / CheckBox | `text`, `initially_checked` | `onvalue`, `offvalue` |
+| Card | (no children kwargs) | `shape` (rectangle/rounded/circle), `image` |
+
+## Layout
+
+Each window's direct children use one **layout type**:
+
+- `place` (default) — absolute `x, y, width, height` per child
+- `vbox` — vertical pack
+- `hbox` — horizontal pack
+- `grid` — `row`, `column`, `sticky`
+
+Nesting: a `CTkFrame` can have its own layout type for its children, independent of the window's. **Limitation:** layout-in-layout depth is currently 1 — a frame inside a vbox can't itself be a vbox. Use `place` inside layout containers.
+
+## Variables (shared state)
+
+Two scopes:
+
+- **Global** — visible to every window in **one page** (Main + Dialogs). Each page owns its own set. Use for cross-window state inside a page.
+- **Local** — visible only to widgets in one window. On Document. Use for window-internal state.
+
+Five types: `str`, `int`, `float`, `bool`, `color` → backed by `tk.StringVar`, `IntVar`, `DoubleVar`, `BooleanVar`, `StringVar`. `color` stores a hex string (`#rrggbb` / `#rgb`) and edits via swatch + picker; the bind-picker on color properties (`fg_color`, `text_color`, `border_color`, …) lists `color` and `str` variables.
+
+Bind from the Properties panel — click the ◇ chip next to a property.
+
+**Auto-wired bindings** (sync live):
+
+| Widget | Property | Wires to |
+|---|---|---|
+| `CTkLabel` | `text` | `textvariable=` |
+| `CTkEntry` | `initial_value` | `textvariable=` |
+| `CTkSlider` | `initial_value` | `variable=` |
+| `CTkSwitch` | `initially_checked` | `variable=` |
+| `CTkCheckBox` | `initially_checked` | `variable=` |
+| `CTkSegmentedButton` | `segment_initial` | `variable=` |
+| `CTkOptionMenu` | `initial_value` | `variable=` |
+| `CTkComboBox` | `initial_value` | `variable=` |
+
+Other CTk-native properties (`fg_color`, `text_color`, `corner_radius`, `state`, …) auto-update at runtime via a `trace_add` → `widget.configure(...)` helper emitted by the exporter.
+
+Font composites (`font_bold`, `font_italic`, `font_size`, `font_family`, `font_underline`, `font_overstrike`) also auto-update — the exporter emits a `_bind_var_to_font` rebuilder per binding. Use them like any other variable: `self.var_is_bold.set(True)` flips every bound label's weight live.
+
+`button_enabled` (Button / Entry / ComboBox / OptionMenu / Switch / CheckBox / RadioButton / Slider / SegmentedButton / Textbox) auto-updates via `_bind_var_to_state` — bool → `state="normal"/"disabled"`.
+
+`label_enabled` (CTkLabel) auto-updates via `_bind_var_to_label_enabled` — bool → swaps `text_color` between the original and `text_color_disabled`.
+
+`font_wrap` (CTkLabel) → `_bind_var_to_font_wrap` — bool → wraplength derive/zero.
+`font_autofit` (CTkLabel) → `_bind_var_to_font_autofit` — bool → recompute best-fit size or restore original.
+`image_color` / `image_color_disabled` (CTkLabel / CTkButton / Image) → `_bind_var_to_image_color_state` — color/str → updates `_maker_image_state` and rebuilds. Coordinated automatically: `label_enabled`/`button_enabled` flip `state["enabled"]`, which picks between `color` and `color_disabled`.
+
+`x` / `y` → `_bind_var_to_place_coord` — int/float → `widget.place_configure(x=…)` (place layout only).
+`image` / `image_width` / `image_height` / `preserve_aspect` → `_bind_var_to_image_path` / `_image_size` / `_preserve_aspect` — share `_maker_image_state` dict on the widget; each helper updates one key then rebuilds.
+
+Remaining frozen: `dropdown_*` composites (CTkOptionMenu / CTkComboBox dropdown styling — Phase 4b).
+
+In exported code:
+
+```python
+class MainWindow(ctk.CTk):
+    def __init__(self):
+        super().__init__()
+        # Globals (only on Main Window class):
+        self.var_username = tk.StringVar(value="")
+        # Locals on this class:
+        self.var_count = tk.IntVar(value=0)
+        ...
+
+class SettingsDialog(ctk.CTkToplevel):
+    def __init__(self, master=None):
+        super().__init__(master)
+        # Globals reach via self.master:
+        self.label.configure(textvariable=self.master.var_username)
+```
+
+## Scripts (CTkScript)
+
+Add behavior by attaching a `CTkScript` subclass to a widget or the window, then binding events to its public methods. Scripts live in a top-level `scripts/` folder (project root, outside `assets/`):
+
+```python
+# scripts/counter.py
+from ctkmaker import CTkScript
+
+class Counter(CTkScript):
+    def on_start(self):          # runs once after the object is built
+        self.n = 0
+    def increment(self):         # bind a button's command to this method
+        self.n += 1
+        self.widget.configure(text=str(self.n))
+```
+
+Scope (strict): attach to a **widget** → `self.widget` only (no window); attach to the **window** → `self.window` (reaches all widgets).
+
+Attach + bind: Properties → **Scripts** group → `+ Add Script` (new or existing); then **Events** group → add event → pick the script + a public method. No forced parameters; the binding is saved in `.ctkproj`, never written into your script. Lifecycle hooks: `on_start`, `on_close`.
+
+Export is self-contained — `CTkScript` is inlined as `ctkmaker.py` and `scripts/` is copied next to the exported window.
+
+Script variables (fields): declare an exposed field — a class-level `tk.Variable` annotation with no value — then set it in the Properties panel's per-script `ClassName (Script)` group:
+
+```python
+class Counter(CTkScript):
+    score: tk.IntVar          # exposed field
+```
+
+Per field: type an inline value (box / checkbox / swatch) → a fresh `tk.Variable` for this object, OR 🔗 link a project variable (type-filtered: globals + this window's locals) → the shared one, so widgets bound to it stay in sync (a `str` field also accepts `color`). Stored in `.ctkproj` by UUID (rename-safe). At export, before `on_start`: `self.score = self.var_hp` (bound) / `tk.IntVar(value=5)` (inline) / `tk.IntVar()` (unset).
+
+## Event handlers
+
+Bind a CTkScript method to a widget event from the Properties panel **Events** group (pick the attached script + a public method):
+
+- **`command`** — click / change events: Button, Switch, CheckBox, RadioButton, Slider, ComboBox, OptionMenu, SegmentedButton.
+- **`bind:<sequence>`** — Tk bind events:
+  - **Entry / Textbox** — `<Return>`, `<KeyRelease>`, `<FocusOut>`.
+  - **Label** — 16 events split into 5 default + 11 advanced. Default (flat list): `<Button-1>` / `<Double-Button-1>` / `<Enter>` / `<Leave>` / `<MouseWheel>`. Advanced (collapsible "Advanced" sub-section in cascade + panel): `<Button-2>` / `<Button-3>` / `<ButtonRelease-1>` / `<Motion>` / `<Configure>` / `<Map>` / `<Unmap>` / `<FocusIn>` / `<FocusOut>` / `<KeyPress>` / `<KeyRelease>`. Focus / key events require `takefocus=True`. CTkLabel routes binds onto both inner canvas and inner Tk Label so the rounded-corner area is also clickable. `<Motion>` and `<Configure>` fire at 60+ Hz — keep handlers cheap.
+
+Exported code wires the picked method:
+
+```python
+class MainWindow(ctk.CTk):
+    def __init__(self):
+        super().__init__()
+        self._script_0 = Counter()
+        self._build_ui()
+        self._script_0.window = self
+        self._script_0.on_start()
+
+    def _build_ui(self):
+        self.button_submit = ctk.CTkButton(
+            self, text="Submit",
+            command=self._script_0.on_submit,
+        )
+```
+
+Multi-method binding fans out via `lambda` for `command`-style or repeated `.bind(seq, fn, add="+")` for bind-style.
+
+## Save format
+
+`.ctkproj` is JSON, schema version 2. Top-level shape:
+
+```json
+{
+    "version": 2,
+    "name": "ProjectName",
+    "active_document": "<doc-uuid>",
+    "documents": [
+        {
+            "id": "<doc-uuid>",
+            "name": "Main Window",
+            "is_toplevel": false,
+            "width": 800, "height": 600,
+            "window_properties": {
+                "fg_color": "transparent",
+                "resizable_x": true, "resizable_y": true,
+                "layout_type": "place"
+            },
+            "widgets": [ ...WidgetNode tree... ],
+            "local_variables": [ ... ],
+            "attached_components": [ ... ]
+        }
+    ],
+    "variables": [ <global vars> ]
+}
+```
+
+A `WidgetNode`:
+
+```json
+{
+    "id": "<widget-uuid>",
+    "name": "submit_btn",
+    "widget_type": "CTkButton",
+    "properties": {
+        "x": 20, "y": 60, "width": 100, "height": 32,
+        "text": "Submit",
+        "fg_color": "#6366f1"
+    },
+    "children": [],
+    "handlers": {"command": [{"kind": "script_call", "class": "Counter", "method": "on_submit", "scope": "window"}]},
+    "attached_components": []
+}
+```
+
+Variable bindings: a property value `"var:<uuid>"` references a `VariableEntry` by ID.
+
+## Asset references
+
+`asset:<kind>/<filename>` tokens in property values:
+
+- `asset:images/avatar.png`
+- `asset:fonts/Inter-Regular.ttf`
+- `asset:icons/save.png`
+
+The runtime resolves them against the project folder. The exporter copies the assets next to the output `.py`.
+
+## Don't-do list
+
+- **Don't reference widgets across documents** — their variables are scoped. For cross-widget logic within one window, attach a script to the **window** (`self.window` reaches every widget on it).
+- **Don't put behavior code in the `.ctkproj`** — bodies live in your `CTkScript` classes under `scripts/`. The `.ctkproj` only stores the binding (event → script class + method).
+- **Don't nest layout containers** — current limitation (one layout-deep). A vbox inside an hbox doesn't work; use `place` inside the inner one.
+- **Don't hand-edit auto-generated `_build_ui()`** — re-export overwrites it. Behavior goes in your CTkScript methods (`on_start` + the handler methods you bind).
+- **Don't rename widgets to non-identifiers if you have handlers wired to them** — exported code uses widget names as Python attribute names. Invalid names get sanitized fallbacks.
+
+## Quick "build me" prompt template
+
+```
+Build a CTkMaker project for a [Login | Dashboard | ...] page.
+
+Requirements:
+- Window size: 400x500
+- Widgets: <list>
+- Variables: <names + types>
+- Behavior: when user [clicks submit | toggles theme | ...], do X.
+
+Constraints:
+- Use the property schemas in WIDGETS.md
+- Layout: place (absolute) for top-level
+- Behavior: CTkScript classes — attach to the window for cross-widget logic
+- Keep behavior bodies short — focus on wiring + state changes
+
+Output:
+1. The `.ctkproj` content (JSON, version 2)
+2. The CTkScript class(es) (.py in scripts/)
+3. Any Lucide icon names I need to download to assets/icons/
+```
+
+## Common patterns
+
+**Login form:**
+- 2 `CTkEntry` (username + password with `show="*"`)
+- 1 `CTkButton` for submit
+- 2 `tk.StringVar` (local) bound to entries
+- Behavior: `on_submit` reads vars, validates, navigates
+
+**Stat dashboard tile:**
+- 1 `Card` (rounded shape) as outer container
+- 1 `CTkLabel` for title
+- 1 `CircularProgress` or `CTkProgressBar` for value
+- 1 `CTkLabel` for subtitle/footer
+- Bind progress to a local `IntVar`
+
+**Theme toggle:**
+- 1 `CTkSwitch` bound to a global `BooleanVar` `var_dark_mode`
+- Multiple windows read the var via `self.master.var_dark_mode`
+- Behavior `on_toggle` calls `ctk.set_appearance_mode(...)` based on var value
