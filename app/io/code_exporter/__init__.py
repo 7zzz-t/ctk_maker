@@ -2574,7 +2574,11 @@ def _geometry_call(
     side = pack_side_for(layout)
     if side is not None:
         parts: list[str] = [f'side="{side}"']
-        stretch = str(props.get("stretch", LAYOUT_DEFAULTS["stretch"]))
+        stretch = str(
+            _resolve_export_raw(
+                props, "stretch", LAYOUT_DEFAULTS["stretch"],
+            ),
+        )
         if stretch == "fill":
             cross = "y" if layout == "hbox" else "x"
             parts.append(f'fill="{cross}"')
@@ -2596,7 +2600,9 @@ def _geometry_call(
             props.get("grid_column", LAYOUT_DEFAULTS["grid_column"]), 0,
         )
         parts = [f"row={row}", f"column={col}"]
-        sticky = props.get("grid_sticky", LAYOUT_DEFAULTS["grid_sticky"])
+        sticky = _resolve_export_raw(
+            props, "grid_sticky", LAYOUT_DEFAULTS["grid_sticky"],
+        )
         if sticky:
             parts.append(f'sticky="{sticky}"')
         half = parent_spacing // 2
