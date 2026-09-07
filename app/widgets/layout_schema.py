@@ -238,6 +238,53 @@ def pack_side_for(parent_layout_type: str) -> str | None:
     return None
 
 
+def managed_geometry_disabled(node) -> frozenset[str]:
+    """Geometry fields of ``node`` that its parent's layout manager
+    owns — the Inspector disables them and canvas resize must not
+    write them (single source of truth for both surfaces).
+
+    - ``place`` parent — nothing managed; user owns x/y/width/height.
+    - ``grid`` parent — grid-cell placement replaces per-widget
+      geometry; x/y/width/height all managed.
+    - ``vbox`` / ``hbox`` parent — x/y always owned by pack. Width /
+      height depend on ``stretch``:
+        - ``fixed``: nothing extra — user controls both axes.
+        - ``fill``: cross axis auto-fills the parent.
+        - ``grow``: cross axis fills; main axis is distributed by
+          ``rebalance_pack_siblings`` — but only when the parent has
+          a fixed main-axis size. On content-sized containers
+          (CTkScrollableFrame content, …) that helper is a no-op and
+          the child keeps its own main-axis property, so the main
+          axis stays user-editable there.
+    """
+    if node is None or getattr(node, "parent", None) is None:
+        return frozenset()
+    parent = node.parent
+    parent_layout = normalise_layout_type(
+        parent.properties.get("layout_type", "place"),
+    )
+    if parent_layout == "place":
+        return frozenset()
+    if parent_layout == "grid":
+        return frozenset(("x", "y", "width", "height"))
+    # vbox / hbox
+    disabled = {"x", "y"}
+    stretch = str(node.properties.get("stretch", "fixed"))
+    main_axis = "width" if parent_layout == "hbox" else "height"
+    cross_axis = "height" if parent_layout == "hbox" else "width"
+    try:
+        parent_main = int(parent.properties.get(main_axis, 0) or 0)
+    except (TypeError, ValueError):
+        parent_main = 0
+    if stretch == "grow":
+        if parent_main > 0:
+            disabled.add(main_axis)
+        disabled.add(cross_axis)
+    elif stretch == "fill":
+        disabled.add(cross_axis)
+    return frozenset(disabled)
+
+
 def _safe_int(value, default: int) -> int:
     try:
         return int(value)

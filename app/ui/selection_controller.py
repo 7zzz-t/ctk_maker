@@ -17,6 +17,7 @@ import tkinter as tk
 from typing import Callable
 
 from app.core.commands import ResizeCommand
+from app.widgets.layout_schema import managed_geometry_disabled
 
 HANDLE_NAMES = ("nw", "n", "ne", "w", "e", "sw", "s", "se")
 HANDLE_SIZE = 8
@@ -247,13 +248,30 @@ class SelectionController:
         node = self.project.get_widget(nid)
         if node is None:
             return
-        if int(node.properties.get("x", 0)) != new_x:
+        # Fields the parent's layout manager owns (see
+        # ``managed_geometry_disabled``) are frozen here too — writing
+        # them from a handle drag would desync canvas from export and
+        # fight the Inspector's disabled state.
+        frozen = managed_geometry_disabled(node)
+        if (
+            "x" not in frozen
+            and int(node.properties.get("x", 0)) != new_x
+        ):
             self.project.update_property(nid, "x", new_x)
-        if int(node.properties.get("y", 0)) != new_y:
+        if (
+            "y" not in frozen
+            and int(node.properties.get("y", 0)) != new_y
+        ):
             self.project.update_property(nid, "y", new_y)
-        if int(node.properties.get("width", 0)) != new_w:
+        if (
+            "width" not in frozen
+            and int(node.properties.get("width", 0)) != new_w
+        ):
             self.project.update_property(nid, "width", new_w)
-        if int(node.properties.get("height", 0)) != new_h:
+        if (
+            "height" not in frozen
+            and int(node.properties.get("height", 0)) != new_h
+        ):
             self.project.update_property(nid, "height", new_h)
         self.update()
 

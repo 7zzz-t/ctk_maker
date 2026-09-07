@@ -1779,59 +1779,16 @@ class SchemaMixin:
 
     def _apply_managed_layout_disabled(self, node) -> None:
         """Disable geometry fields for managed-layout children based on
-        the parent's layout manager + the child's ``stretch`` setting:
-
-        - ``place`` parent — no override; user owns x/y/width/height.
-        - ``grid`` parent — placement is grid-cell driven; disable
-          x/y/width/height across the board (per-cell sizing replaces
-          per-widget sizing).
-        - ``vbox`` / ``hbox`` parent — disable x/y always; width/height
-          per-stretch (v1.10.2):
-            - ``fixed``: nothing extra disabled — user controls W and H.
-            - ``fill``: cross axis disabled (auto-fills the parent).
-              hbox → height disabled; vbox → width disabled.
-            - ``grow``: main axis owned by ``rebalance_pack_siblings``,
-              cross axis filled by pack — both disabled.
+        the parent's layout manager + the child's ``stretch`` setting.
+        Delegates to ``managed_geometry_disabled`` in layout_schema so
+        the Inspector and the canvas resize path share one rule set:
+        whatever is disabled here is also frozen on the canvas.
         """
-        from app.widgets.layout_schema import normalise_layout_type
+        from app.widgets.layout_schema import managed_geometry_disabled
         if node is None or node.parent is None:
             return
-        parent_layout = normalise_layout_type(
-            node.parent.properties.get("layout_type", "place"),
-        )
-        if parent_layout == "place":
-            return
-        # grid: legacy behavior — disable everything geometry-related.
-        if parent_layout == "grid":
-            for field in ("x", "y", "width", "height"):
-                self._disabled_states[field] = True
-            return
-        # vbox / hbox: x/y always managed by pack, never user-editable.
-        for field in ("x", "y"):
+        for field in managed_geometry_disabled(node):
             self._disabled_states[field] = True
-        stretch = str(node.properties.get("stretch", "fixed"))
-        main_axis = "width" if parent_layout == "hbox" else "height"
-        cross_axis = "height" if parent_layout == "hbox" else "width"
-        try:
-            parent_main = int(
-                node.parent.properties.get(main_axis, 0) or 0,
-            )
-        except (TypeError, ValueError):
-            parent_main = 0
-        if stretch == "grow":
-            # Main axis is auto-distributed by rebalance_pack_siblings
-            # only when the parent has a fixed main-axis size. On
-            # free-height containers (CTkScrollableFrame content, or
-            # any container whose main axis is content-sized) the
-            # rebalance helper is a no-op and the child keeps its own
-            # main-axis property — mirror that here so the field stays
-            # editable (canvas resize handles already honour it).
-            if parent_main > 0:
-                self._disabled_states[main_axis] = True
-            self._disabled_states[cross_axis] = True
-        elif stretch == "fill":
-            self._disabled_states[cross_axis] = True
-        # stretch == "fixed" — leave both W/H editable; user owns both.
 
     def _is_hidden(self, prop: dict, properties: dict) -> bool:
         """Schema rows can declare a ``hidden_when(properties)``
