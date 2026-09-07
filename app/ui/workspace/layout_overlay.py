@@ -528,7 +528,6 @@ class LayoutOverlayManager:
 
         Mirrors CSS flex on a vbox/hbox container, with three
         ``stretch`` semantics:
-
         - ``"fixed"`` — user controls both axes (CSS ``flex: 0 0 W``).
           Main-axis size = ``node.properties[axis]`` at face value;
           cross-axis stays at its configured size.
@@ -552,6 +551,12 @@ class LayoutOverlayManager:
         and (d) treated ``fill`` like ``grow`` so users couldn't pin
         a specific width on a fill child.
         """
+        # Scrollable content is content-sized — children may exceed the
+        # viewport and are reached by scrolling, so never flex-shrink
+        # them into the viewport height (that is what squashed nested
+        # grids / clipped checkboxes inside CTkScrollableFrame).
+        if getattr(parent_node, "widget_type", "") == "CTkScrollableFrame":
+            return
         all_siblings = list(parent_node.children)
         if not all_siblings:
             return

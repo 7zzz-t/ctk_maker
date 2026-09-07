@@ -272,8 +272,18 @@ def managed_geometry_disabled(node) -> frozenset[str]:
     stretch = str(node.properties.get("stretch", "fixed"))
     main_axis = "width" if parent_layout == "hbox" else "height"
     cross_axis = "height" if parent_layout == "hbox" else "width"
+    # A scrollable frame's content axis is content-sized: children may
+    # exceed the viewport and are reached by scrolling, so the main
+    # axis is never auto-distributed into the viewport height. Treat
+    # it as free (parent_main = 0) exactly like a container whose own
+    # main-axis size is unset.
+    is_scroll_content = (
+        getattr(parent, "widget_type", "") == "CTkScrollableFrame"
+    )
     try:
-        parent_main = int(parent.properties.get(main_axis, 0) or 0)
+        parent_main = 0 if is_scroll_content else int(
+            parent.properties.get(main_axis, 0) or 0,
+        )
     except (TypeError, ValueError):
         parent_main = 0
     if stretch == "grow":
