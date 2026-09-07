@@ -656,6 +656,24 @@ class LayoutOverlayManager:
             anchor_widget.place(**place_kw)
         except tk.TclError:
             pass
+        # Grid backfill — the grid manager owns this child's on-canvas
+        # size (stretch resolved via grid_sticky), so write the
+        # cell-allocated dimensions back into the model in doc coords.
+        # Without this the node keeps a stale editor-era width/height
+        # (e.g. 343 left over from a pre-grid drag), which widget
+        # construction — on canvas AND in the exported preview — reads
+        # and turns into a canvas-vs-preview mismatch (a 343-high label
+        # in a ~30-high cell). Model-only write: no history push, no
+        # event, so it can't recurse or spam undo.
+        if cfg_w is not None and cfg_h is not None:
+            zoom = self.zoom.value or 1.0
+            back_w = max(1, int(round(cfg_w / zoom)))
+            back_h = max(1, int(round(cfg_h / zoom)))
+            props = child_node.properties
+            if props.get("width") != back_w:
+                props["width"] = back_w
+            if props.get("height") != back_h:
+                props["height"] = back_h
 
     def _apply_place_manager(
         self, anchor_widget, child_node,
