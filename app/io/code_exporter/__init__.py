@@ -834,7 +834,7 @@ def export_project(
     if _project_uses_scrollable_dropdown(project, single_document_id):
         helper_src = Path(
             __file__,
-        ).resolve().parent.parent.joinpath(
+        ).resolve().parent.parent.parent.joinpath(
             "widgets", "scrollable_dropdown.py",
         ).read_text(encoding="utf-8")
         out.with_name("scrollable_dropdown.py").write_text(
