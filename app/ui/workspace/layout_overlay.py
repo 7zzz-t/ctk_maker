@@ -102,6 +102,32 @@ def _sticky_axis(
     return avail_pos + (avail_size - child_size) / 2, child_size
 
 
+def _layout_props_resolved(project, node) -> dict:
+    """Copy ``node.properties`` with any ``var:<uuid>`` tokens replaced
+    by the bound variable's current literal value, so the layout math
+    (grid_row / grid_column / grid_sticky / stretch / width / height)
+    sees usable values on the canvas.
+
+    Layout keys are never in ``BINDING_WIRINGS``, so
+    ``resolve_bindings`` keeps them under ``cleaned`` with the current
+    literal substituted. Wiring keys (``text`` / ``variable`` …) are
+    irrelevant to geometry and may be dropped — harmless here.
+    """
+    if node is None:
+        return {}
+    props = node.properties
+    if project is None:
+        return props
+    from app.core.variables import resolve_bindings
+    try:
+        cleaned, _ = resolve_bindings(
+            project, node.widget_type, dict(props),
+        )
+        return cleaned
+    except Exception:
+        return props
+
+
 def _grid_child_place_kwargs(
     parent_props: dict, child_props: dict, zoom: float = 1.0,
 ) -> dict:
@@ -377,13 +403,15 @@ class LayoutOverlayManager:
         dispatch — the per-manager bodies are split into their own
         methods for readability + testability.
         """
+        parent_props = _layout_props_resolved(self.project, parent_node)
+        child_props = _layout_props_resolved(self.project, child_node)
         manager, mgr_kwargs = _child_manager_kwargs(
-            parent_node, child_node.properties, zoom=self.zoom.value,
+            parent_node, child_props, zoom=self.zoom.value,
         )
         _forget_current_manager(anchor_widget)
         try:
-            lw = int(child_node.properties.get("width", 0) or 0)
-            lh = int(child_node.properties.get("height", 0) or 0)
+            lw = int(child_props.get("width", 0) or 0)
+            lh = int(child_props.get("height", 0) or 0)
         except (TypeError, ValueError):
             lw = lh = 0
         is_composite = child_node.id in self.anchor_views
@@ -393,7 +421,10 @@ class LayoutOverlayManager:
                 mgr_kwargs, lw, lh, is_composite,
             )
         elif manager == "grid":
-            self._apply_grid_manager(anchor_widget, parent_node, child_node)
+            self._apply_grid_manager(
+                anchor_widget, parent_node, child_node,
+                parent_props, child_props,
+            )
         else:
             self._apply_place_manager(
                 anchor_widget, child_node, lw, lh, is_composite,
@@ -605,13 +636,13 @@ class LayoutOverlayManager:
 
     def _apply_grid_manager(
         self, anchor_widget, parent_node, child_node,
+        parent_props: dict, child_props: dict,
     ) -> None:
         """grid branch — `_grid_child_place_kwargs` does the cell
         math; we configure the cell-sized dimensions and place the
         widget at the computed coords."""
         place_kw = _grid_child_place_kwargs(
-            parent_node.properties if parent_node else {},
-            child_node.properties,
+            parent_props, child_props,
             zoom=self.zoom.value,
         )
         cfg_w = place_kw.pop("_cfg_width", None)
