@@ -21,6 +21,11 @@ _WIDGET_TYPE_RENAMES = {
 # the next save, which degrades the file to the fixed snapshot height.
 _CTKFRAME_AUTO_HEIGHT_KEY = "_ctkmaker_auto_height"
 _CTKFRAME_AUTO_HEIGHT_SNAPSHOT = 200
+# Single top-level carrier for ALL 02 builder-only enhancement params
+# (see docs/LAYOUT_ENHANCEMENT_COMPAT.md §11). Kept out of
+# ``properties`` for the same reason as the auto-height marker: stock
+# 00 forwards every property key to the CTk constructor.
+_CTKMETA_KEY = "_ctkmaker_meta"
 
 
 def clean_component_dict(raw) -> dict | None:
@@ -94,6 +99,12 @@ class WidgetNode:
         # group_id is metadata, not hierarchy. Skipped from code
         # export (the generated Python sees only individual widgets).
         self.group_id: str | None = None
+        # Builder-only enhancement parameters (auto-height mode, main-
+        # axis percent/remainder, …). Serialised as the single top-level
+        # ``_ctkmaker_meta`` key; NEVER merged into ``properties`` (stock
+        # 00 forwards every property key to the CTk constructor).
+        # See docs/LAYOUT_ENHANCEMENT_COMPAT.md §11.
+        self.extra: dict = {}
         # AI-bridge meta-property. Plain-language description of what
         # this widget should do. Emitted as Python comments above the
         # widget's constructor call in code export so an AI can read
@@ -154,6 +165,8 @@ class WidgetNode:
         }
         if disk_auto:
             result[_CTKFRAME_AUTO_HEIGHT_KEY] = True
+        if self.extra:
+            result[_CTKMETA_KEY] = copy.deepcopy(dict(self.extra))
         if self.parent_slot is not None:
             result["parent_slot"] = self.parent_slot
         if self.group_id is not None:
@@ -205,6 +218,9 @@ class WidgetNode:
         node.parent_slot = data.get("parent_slot")
         node.group_id = data.get("group_id")
         node.description = data.get("description", "")
+        raw_meta = data.get(_CTKMETA_KEY)
+        if isinstance(raw_meta, dict):
+            node.extra = dict(raw_meta)
         # Old ``.ctkproj`` files may carry legacy handler shapes:
         # bare method-name strings (page methods), ``ref_call`` dicts
         # (Object References), or ``library_call`` dicts (library

@@ -87,3 +87,43 @@ def test_nested_auto_frame_is_mapped_recursively():
     assert child_disk["_ctkmaker_auto_height"] is True
     restored = WidgetNode.from_dict(disk)
     assert restored.children[0].properties["height"] == 0
+
+
+# ---------------------------------------------------------------------
+# WidgetNode.extra — builder-only enhancement params (_ctkmaker_meta)
+# ---------------------------------------------------------------------
+def test_extra_roundtrips_through_top_level_meta():
+    node = _frame(150)
+    node.extra = {"height_mode": "auto", "main_axis": {"mode": "percent", "percent": 40}}
+    disk = node.to_dict()
+    assert disk["_ctkmaker_meta"] == {
+        "height_mode": "auto",
+        "main_axis": {"mode": "percent", "percent": 40},
+    }
+    # properties stays CTk-safe — no meta leakage.
+    assert "_ctkmaker_meta" not in disk["properties"]
+    restored = WidgetNode.from_dict(disk)
+    assert restored.extra == node.extra
+    assert "_ctkmaker_meta" not in restored.properties
+
+
+def test_empty_extra_emits_no_meta_key():
+    node = _frame(150)
+    disk = node.to_dict()
+    assert "_ctkmaker_meta" not in disk
+    restored = WidgetNode.from_dict(disk)
+    assert restored.extra == {}
+
+
+def test_nested_extra_is_restored_recursively():
+    parent = _frame(150)
+    child = _frame(150)
+    child.extra = {"main_axis": {"mode": "remain"}}
+    child.parent = parent
+    parent.children.append(child)
+    disk = parent.to_dict()
+    assert disk["children"][0]["_ctkmaker_meta"] == {
+        "main_axis": {"mode": "remain"},
+    }
+    restored = WidgetNode.from_dict(disk)
+    assert restored.children[0].extra == {"main_axis": {"mode": "remain"}}

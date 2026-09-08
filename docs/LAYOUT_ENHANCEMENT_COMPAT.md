@@ -143,12 +143,75 @@
 
 ### 9.3 后续待办
 
-- [ ] 值层：完成画布侧复核（00 渲染 height=0 的实际像素表现，人工预览确认）；
-- [ ] 若未来实现容器默认拉伸/百分比：所有新表达遵循第五、六节映射与私有键约定；
-- [ ] 导出无残留收尾（第八节清单）。
+- [x] 值层：00 画布 height=0 表现已人工复核（不可见 → 已走 ③ 映射，见 9.2）；
+- [ ] 导出无残留收尾（第八节清单）；
+- [x] 新参数类别机制设计 → 见第十一节（决策 `dec-aa6eedbd648307d7` 一步到位全做）。
 
 ---
 
-## 十、变更记录
+## 十一、增强参数机制（新参数类别，v1 设计定稿）
+
+> 决策 `dec-aa6eedbd648307d7`：新语义（auto-height、主轴百分比/剩余平分）不再
+> 复用原版字段当暗号，而是做成**正式的一等参数**：UI 有专属新行、存储独立、
+> 原版字段退化为"自动维护的兼容快照"。
+
+### 11.1 为什么不再"复用"
+
+- 旧做法用 `height=0` 表达 auto：H 行显示"假值"、保存要换算快照，语义藏在 0 里；
+- 百分比/剩余若塞进 `stretch` 三档会与 00 枚举冲突。
+- 结论：用户语义与原版字段解耦 —— 新参数存 `WidgetNode.extra`，原版字段由系统
+  按快照规则自动同步，00 永远只看到"合理原版形态"。
+
+### 11.2 存储
+
+- `WidgetNode.extra: dict` —— builder-only 增强参数（内存态即用户语义）。
+- 磁盘序列化为 node 顶层单键 `_ctkmaker_meta`（JSON 对象）；**禁止进入
+  `properties`**（00 全量传 CTk 构造器会崩，见第三节）。
+- 00 另存按白名单丢弃顶层键 → 节点降级为快照值（预期，见第六节）。
+
+### 11.3 参数清单 v1
+
+| 参数 | 适用 | 取值 | 语义 | 原版快照 |
+|---|---|---|---|---|
+| `height_mode` | CTkFrame | `fixed`(默认) / `auto` | auto=内容决定高 | auto → `height=快照(200)`；fixed → `height` 正常 |
+| `main_axis.mode` | vbox/hbox 子 | `content`(默认) / `percent` / `remain` | content=自然；percent=父主轴 N%；remain=吃剩余 | `stretch`：percent/remain 定高父→`grow`，自由轴父→`fixed` |
+| `main_axis.percent` | 同上 | 1–100 | 仅 mode=percent 生效 | 见上 |
+
+### 11.4 UI（仅 02 显示，00 面板天然无这些行）
+
+- 容器 Layout 组新增：「高度模式：固定 | 自动」（CTkFrame）；
+- vbox/hbox 子的「拉伸」行改造为「主轴：内容 | 百分比 | 剩余」，percent 时出现
+  数值行（1–100，步进 5）；受管/多选/禁用规则沿用 `managed_geometry_disabled` 同源；
+- **退役**：CTkFrame 不再用 H=0 表达 auto（H 行恢复 clamp ≥1），「高度模式：自动」
+  是新入口。
+
+### 11.5 导出（不残留，静态化）
+
+- auto（height_mode=auto）→ 省略 `height` configure（现状）；
+- percent（定高父）→ 导出时按父主轴固定尺寸**静态算 px**：
+  `h_px = round(parent_main_px × percent/100)` → 写 `configure(height=h_px)`；
+- remain → `stretch="grow"`（运行时框架均分剩余，零残留）；
+- percent 在 auto/滚动/内容父 → 降级 content（与编辑器一致）。
+
+### 11.6 迁移
+
+- 旧顶层 `_ctkmaker_auto_height`（marker 形态）→ 加载转 `extra.height_mode="auto"`；
+- 旧裸 `height=0` 文件 → 加载即视为 auto（与既有行为一致）；
+- 存量文件下次保存自动升级为新参数形态。
+
+### 11.7 实施阶段（对应任务清单）
+
+1. `WidgetNode.extra` + `_ctkmaker_meta` 序列化与迁移；
+2. 面板 extra 行注入/编辑（含多选批量）；
+3. auto-height 重构为 `height_mode`（画布/导出/commit 读 extra）；
+4. `main_axis` percent/remain 计算与导出静态化；
+5. 兼容回归 + 全量测试 + 文档收口。
+
+---
+
+## 十二、变更记录
 
 - 2026-09-08：定稿（四层规则 + 双向映射 + 私有键约定 + 导出无残留 + 存量盘点待办）。
+- 2026-09-08：私有键位置修订（node 顶层，禁入 properties —— 00 全量传参崩溃实测）；
+  auto-height 磁盘映射实施（`dec-0f67cc2227ac0d14`）与修订（`7783611`）。
+- 2026-09-08：新增第十一节「增强参数机制」设计（`dec-aa6eedbd648307d7`，一步到位全做）。
