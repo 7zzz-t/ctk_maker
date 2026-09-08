@@ -31,13 +31,14 @@
 | 事实 | 依据 |
 |---|---|
 | 00 的 `WidgetNode` 是通用 dict 存储，加载 `properties` 照单全收，无 schema 白名单过滤 | 00 `app/core/widget_node.py`：`properties=data.get("properties", {})`；`to_dict()` 全量回写 |
-| 00 loader 只定向 strip 它认识的旧字段，不剔除未知键 | 00 `app/io/project_loader.py` 各迁移段 |
-| 属性面板按 descriptor `property_schema` 白名单渲染行 → 未知键**无行、不显示** | schema 驱动渲染 |
-| 导出按 descriptor schema 收集 → 未知键不进导出代码 | exporter 逐 schema 发射 |
-| builder-only 元数据（name / visible / locked / group_id …）本就随 node 保存且 00 容忍 | `WidgetNode` 字段先例 |
+| 00 加载 `WidgetNode` 挑已知键读，未知**顶层**字段被忽略、不报错 | 00 `app/core/widget_node.py::from_dict`（挑键读取） |
+| 00 另存按白名单输出 → 顶层未知字段会**丢失** | 00 `to_dict` 白名单 |
+| 00 渲染 `create_widget` 把**全部 `properties` 键**当 CTk 构造参数 | **实测崩溃**：`ValueError: ['_ctkmaker_auto_height'] are not supported arguments`（`ctk_base_class.check_kwargs_empty`） |
 
-**危险点**：给 00 **已存在**的键写入 00 不认识的**新值**（如 `stretch="-"`）→
-00 枚举面板无该选项、显示异常并回退默认、导出行为改变。**此类一律禁止落盘。**
+**危险点（实测修正）**：
+- 给 00 **已存在**的键写入 00 不认识的**新值**（如 `stretch="-"`）→ 00 枚举面板无该选项、显示异常并回退默认。
+- 给 `properties` 塞任何 00 不认识的新键 → 00 **实例化即崩溃**（全量传 CTk 构造器）。
+- 因此 builder-only 数据**只能放 node dict 顶层字段**，绝不放 `properties`。
 
 ---
 
@@ -72,9 +73,11 @@
 
 ## 六、私有键约定（builder-only）
 
-- **位置**：挂在对应 `WidgetNode.properties` 内（与 00 共用 dict，00 无感知）。
-- **命名**：统一前缀 `_ctkmaker_`（如 `_ctkmaker_layout`），键以 `_` 开头以示
-  builder-only；不用 `name`/`id` 等与 00 语义冲突的名字。
+- **位置**：挂在对应 widget 的 **node dict 顶层字段**（与 `visible` / `locked` /
+  `group_id` 并列），**禁止放入 `properties`** —— 00 会把 `properties` 全量传给
+  CTk 构造器，未知属性键会当场崩溃（实测 `not supported arguments`）；顶层
+  未知字段 00 忽略、不报错（00 另存按白名单会丢弃 → 节点降级为快照值）。
+- **命名**：统一前缀 `_ctkmaker_`（如 `_ctkmaker_auto_height`）。
 - **载荷**：单个 JSON 可序列化对象；**版本字段**随附（`{"v": 1, ...}`），便于
   未来迁移。
 - **约束**：
@@ -132,7 +135,7 @@
 
 | 候选值 | 判定 | 说明 |
 |---|---|---|
-| `CTkFrame height=0`（auto 语义，e231ab8 放行） | **已实施 ③ 映射**（决策 `dec-0f67cc2227ac0d14`） | 00 实测：加载无报错、H 格显示 0、但画布**不可见**（0 高）→ 改为磁盘私有键+快照：`to_dict` 把 `height=0` 写为 `height=200` + `_ctkmaker_auto_height:true`；`from_dict` 还原为 0。00 打开 = 正常可见固定高 frame；02 重开恢复 auto。旧裸 0 文件加载即 auto，保存自动升级。见 `app/core/widget_node.py`。 |
+| `CTkFrame height=0`（auto 语义，e231ab8 放行） | **已实施 ③ 映射**（决策 `dec-0f67cc2227ac0d14`，第一版实测崩后修订） | 00 实测一：加载无报错、H 格 0、画布不可见；实测二：marker 放 `properties` 会崩（`not supported arguments`）→ 最终形态：`to_dict` 把 `height=0` 写为 `height=200`（properties，保持 CTk 可构造）+ **顶层** `_ctkmaker_auto_height:true`；`from_dict` 还原 0。00 打开 = 可见固定高 frame；00 另存会丢顶层键 → 节点降级为 200 固定高（预期）；02 重开（未另存）恢复 auto。旧裸 0 文件加载即 auto、保存自动升级。见 `app/core/widget_node.py`。 |
 | 受管 vbox/grid 子 x/y 缺失（cc19a26 删除） | 无风险 | 00 对 pack/grid 子不读 x/y；缺省即默认，渲染由父布局决定。 |
 | grid 容器 `grid_rows/cols` 增长值 | 无风险 | 00 原生键、int、同 schema（min1 max50 两边一致）。 |
 | `stretch` / `grid_sticky` 等 | 无风险 | 00 原生三值/组合，两版同源。 |

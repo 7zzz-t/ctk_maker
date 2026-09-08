@@ -12,10 +12,13 @@ _WIDGET_TYPE_RENAMES = {
 # Builder-only disk carriers for 02 features stock CTkMaker (00) can't
 # express. In-memory, a CTkFrame ``height == 0`` means "auto-height"
 # (content-sized container); stock 00 renders 0-height frames as
-# invisible, so on disk we write a visible snapshot height plus this
-# marker key. 02 restores ``height = 0`` on load; stock 00 ignores the
-# unknown key (universal properties dict, schema-driven rendering) and
-# simply sees a normal fixed-height frame.
+# invisible, so on disk we write a visible snapshot height plus a
+# marker. The marker MUST live at the widget's TOP level, NOT inside
+# ``properties``: stock 00 hands every ``properties`` key to the CTk
+# constructor (``create_widget``), so an unknown property key crashes
+# with "not supported arguments". Unknown top-level keys are ignored by
+# 00's loader (it only reads keys it knows); 00's saver drops them on
+# the next save, which degrades the file to the fixed snapshot height.
 _CTKFRAME_AUTO_HEIGHT_KEY = "_ctkmaker_auto_height"
 _CTKFRAME_AUTO_HEIGHT_SNAPSHOT = 200
 
@@ -130,15 +133,16 @@ class WidgetNode:
         # ``props["image"]`` to an ``asset:images/...`` token and the
         # canvas's PIL.open then choked on a path it couldn't read.
         props = dict(self.properties)
-        if (
+        disk_auto = (
             self.widget_type == "CTkFrame"
             and props.get("height") == 0
-        ):
+        )
+        if disk_auto:
             # In-memory 0 = auto-height (content-sized). Disk carries a
-            # visible snapshot height + marker so stock 00 opens the
-            # frame as a normal visible widget (see module docstring).
+            # visible snapshot height (properties must stay CTk-safe —
+            # stock 00 forwards every property key to the constructor)
+            # plus a top-level marker (see module docstring).
             props["height"] = _CTKFRAME_AUTO_HEIGHT_SNAPSHOT
-            props[_CTKFRAME_AUTO_HEIGHT_KEY] = True
         result = {
             "id": self.id,
             "name": self.name,
@@ -148,6 +152,8 @@ class WidgetNode:
             "locked": self.locked,
             "children": [c.to_dict() for c in self.children],
         }
+        if disk_auto:
+            result[_CTKFRAME_AUTO_HEIGHT_KEY] = True
         if self.parent_slot is not None:
             result["parent_slot"] = self.parent_slot
         if self.group_id is not None:
@@ -183,12 +189,11 @@ class WidgetNode:
         raw_props = data.get("properties", {})
         if (
             widget_type == "CTkFrame"
-            and raw_props.get(_CTKFRAME_AUTO_HEIGHT_KEY)
+            and data.get(_CTKFRAME_AUTO_HEIGHT_KEY)
         ):
-            # Disk snapshot + marker → in-memory auto-height (0).
+            # Disk snapshot + top-level marker → in-memory auto (0).
             raw_props = dict(raw_props)
             raw_props["height"] = 0
-            raw_props.pop(_CTKFRAME_AUTO_HEIGHT_KEY, None)
         node = cls(
             widget_type=widget_type,
             properties=raw_props,
