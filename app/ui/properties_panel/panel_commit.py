@@ -879,6 +879,28 @@ class CommitMixin:
         if getattr(self, "_suspend_history", False):
             return
         self.project.history.push(MultiWidgetPropertyCommand(entries))
+        # Batch fan-out publishes property_changed per widget, so the
+        # primary's cell may briefly re-render as mixed (empty) while
+        # later siblings still carry their old values. Re-render the
+        # affected row once every widget is settled — a shared value
+        # then displays normally instead of leaving a stale blank.
+        self._refresh_batch_row(pname)
+
+    def _refresh_batch_row(self, pname: str) -> None:
+        """Re-render one schema row after a batch commit so the cell
+        reflects the post-batch aggregate (shared value or mixed-empty).
+        """
+        descriptor = self._current_descriptor()
+        if descriptor is None:
+            return
+        prop = self._find_prop(descriptor, pname)
+        iid = self._prop_iids.get(pname)
+        if prop is None or iid is None:
+            return
+        node = self.project.get_widget(self.current_id)
+        if node is None:
+            return
+        self._refresh_cell(iid, prop, node.properties.get(pname))
 
     def _batch_grid_shrink_guard(self, node, pname: str, value) -> bool:
         """Grid-shrink check used per widget during a batch commit.

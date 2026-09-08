@@ -142,3 +142,64 @@ def test_unchanged_value_contributes_no_entry():
         project, [b1.id, b2.id], "CTkButton", "text", "Same",
     )
     assert entries == []
+
+
+# ---------------------------------------------------------------------
+# Multi-select aggregate display (_batch_mixed_value)
+# ---------------------------------------------------------------------
+from app.ui.properties_panel.panel_schema import SchemaMixin  # noqa: E402
+
+
+class _PanelStub:
+    def __init__(self, project, batch_ids):
+        self.project = project
+        self._batch_ids = list(batch_ids)
+
+
+def _is_mixed(project, batch_ids, pname) -> bool:
+    return SchemaMixin._batch_mixed_value(
+        _PanelStub(project, batch_ids), pname,
+    )
+
+
+def test_shared_value_is_not_mixed():
+    project, doc = _make_project()
+    b1 = _add_button(project, doc, text="Same")
+    b2 = _add_button(project, doc, text="Same")
+    assert _is_mixed(project, [b1.id, b2.id], "text") is False
+
+
+def test_disagreement_is_mixed():
+    project, doc = _make_project()
+    b1 = _add_button(project, doc, text="One")
+    b2 = _add_button(project, doc, text="Two")
+    assert _is_mixed(project, [b1.id, b2.id], "text") is True
+
+
+def test_no_batch_is_never_mixed():
+    project, doc = _make_project()
+    b1 = _add_button(project, doc, text="One")
+    assert _is_mixed(project, [b1.id], "text") is False
+    assert _is_mixed(project, [], "text") is False
+
+
+def test_managed_widgets_do_not_force_mixed():
+    # Both buttons sit in a vbox frame with stretch=fill — width is
+    # owned by the parent, so the differing widths must NOT read as
+    # "mixed" (the row can't edit them anyway); height is user-owned.
+    project, doc = _make_project()
+    from app.widgets.registry import get_descriptor
+    frame = WidgetNode(
+        widget_type="CTkFrame",
+        properties=dict(get_descriptor("CTkFrame").default_properties),
+    )
+    frame.properties["layout_type"] = "vbox"
+    frame.properties["width"] = 200
+    frame.properties["height"] = 200
+    project.add_widget(frame, document_id=doc.id)
+    b1 = _add_button(project, doc, parent_id=frame.id,
+                     text="A", width=80, height=30, stretch="fill")
+    b2 = _add_button(project, doc, parent_id=frame.id,
+                     text="B", width=300, height=44, stretch="fill")
+    assert _is_mixed(project, [b1.id, b2.id], "width") is False
+    assert _is_mixed(project, [b1.id, b2.id], "height") is True

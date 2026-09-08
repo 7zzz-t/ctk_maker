@@ -1479,6 +1479,33 @@ class SchemaMixin:
         for item in items:
             self._insert_prop(item, properties, parent_iid)
 
+    def _batch_mixed_value(self, pname: str) -> bool:
+        """Multi-select aggregate: True when the selected widgets
+        disagree on ``pname`` — the row then renders empty so the user
+        knows typing a value will UNIFY them (shared value -> panel
+        shows it, nothing special needed).
+
+        Widgets whose parent layout owns the field
+        (``managed_geometry_disabled``) are excluded from the tally —
+        they can't be edited in this batch, so they shouldn't force a
+        "mixed" state on a row that applies to the rest.
+        """
+        ids = self._batch_ids or ()
+        if len(ids) < 2:
+            return False
+        from app.widgets.layout_schema import managed_geometry_disabled
+        seen = _NO_VALUE = object()
+        for widget_id in ids:
+            node = self.project.get_widget(widget_id)
+            if node is None or pname in managed_geometry_disabled(node):
+                continue
+            current = node.properties.get(pname)
+            if seen is _NO_VALUE:
+                seen = current
+            elif current != seen:
+                return True
+        return False
+
     def _insert_prop(
         self, prop: dict, properties: dict, parent_iid: str,
     ) -> None:
@@ -1496,13 +1523,23 @@ class SchemaMixin:
                 or pname
             )
         value = properties.get(pname)
+        # Multi-select: all-equal values render as-is; a disagreement
+        # shows an EMPTY cell so the user knows the next edit unifies.
+        mixed = bool(getattr(self, "_batch_ids", None)) and (
+            self._batch_mixed_value(pname)
+        )
+        if mixed:
+            value = None
         iid = f"p:{pname}"
         self._prop_iids[pname] = iid
 
-        chip = _binding_chip_text(self.project, value)
-        display = chip if chip is not None else format_value(
-            ptype, value, prop,
-        )
+        chip = None if mixed else _binding_chip_text(self.project, value)
+        if mixed:
+            display = ""
+        elif chip is not None:
+            display = chip
+        else:
+            display = format_value(ptype, value, prop)
         tags = self._row_tags_for(pname, prop, value)
 
         self.tree.insert(
@@ -1663,10 +1700,18 @@ class SchemaMixin:
 
     def _refresh_cell(self, iid: str, prop: dict, value) -> None:
         ptype = prop["type"]
-        chip = _binding_chip_text(self.project, value)
-        display = chip if chip is not None else format_value(
-            ptype, value, prop,
+        mixed = bool(getattr(self, "_batch_ids", None)) and (
+            self._batch_mixed_value(prop["name"])
         )
+        if mixed:
+            value = None
+        chip = None if mixed else _binding_chip_text(self.project, value)
+        if mixed:
+            display = ""
+        elif chip is not None:
+            display = chip
+        else:
+            display = format_value(ptype, value, prop)
         # Boxed Interaction values live in a VALUE_BG overlay label, not
         # the native cell text — update the label and keep the cell empty.
         if iid in self._boxed_value_iids and chip is None:
