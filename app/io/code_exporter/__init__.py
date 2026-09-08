@@ -2238,6 +2238,13 @@ def _emit_widget(
             continue
         if key in overrides:
             val = overrides[key]
+        if key in ("height", "width"):
+            # First-class percent (spec §11): main-axis px ships as the
+            # exact constructor size when the parent's main axis is
+            # fixed; free-axis parents return None (degrade to content).
+            px = _percent_axis_px(node, key)
+            if px is not None:
+                val = px
         if key in multiline_list_keys:
             lines_list = [
                 ln for ln in str(val or "").splitlines() if ln.strip()
@@ -2480,6 +2487,7 @@ def _emit_widget(
             full_name, props, parent_layout, parent_spacing,
             child_index, parent_cols, parent_rows,
             parent_is_scroll=parent_is_scroll,
+            node=node,
         ),
     )
 
@@ -2495,7 +2503,13 @@ def _emit_widget(
         _axis = "height" if _normalised_parent == "vbox" else "width"
         _min = content_min_axis(node, _axis)
         lines.append(f"{full_name}._ctkmaker_min = {_min}")
-        if str(props.get("stretch", "fixed")) in ("fixed", "fill"):
+        from app.widgets.extra_params import main_axis_mode
+        if (
+            str(props.get("stretch", "fixed")) in ("fixed", "fill")
+            or main_axis_mode(node) == "percent"
+        ):
+            # percent children ship an exact constructor px — the
+            # runtime balance helper must leave them alone too.
             lines.append(f"{full_name}._ctkmaker_fixed = True")
         # Image is a CTkLabel + CTkImage; the helper needs to resize
         # the embedded CTkImage, not just the label box. Marker tells
@@ -2593,11 +2607,31 @@ def _scrollable_dropdown_lines(var_name: str, props: dict) -> list[str]:
     return lines
 
 
+def _percent_axis_px(node, key: str):
+    """Main-axis px for a first-class percent child (spec §11), or None
+    when the child isn't percent / the parent's main axis is free
+    (scroll content, auto height) — percent then degrades to content."""
+    if node is None:
+        return None
+    from app.widgets.extra_params import (
+        main_axis_mode,
+        parent_main_axis,
+        parent_main_px,
+        percent_px,
+    )
+    if main_axis_mode(node) != "percent":
+        return None
+    if parent_main_axis(node) != key:
+        return None
+    return percent_px(node, parent_main_px(node))
+
+
 def _geometry_call(
     full_name: str, props: dict, parent_layout: str,
     parent_spacing: int = 0, child_index: int = 0,
     parent_cols: int = 1, parent_rows: int = 1,
     parent_is_scroll: bool = False,
+    node=None,
 ) -> str:
     layout = normalise_layout_type(parent_layout)
     side = pack_side_for(layout)
@@ -2608,6 +2642,13 @@ def _geometry_call(
                 props, "stretch", LAYOUT_DEFAULTS["stretch"],
             ),
         )
+        if node is not None:
+            from app.widgets.extra_params import main_axis_mode
+            if main_axis_mode(node) == "percent":
+                # Percent child: its main-axis size ships as the exact
+                # constructor height/width px, so pack must fill only the
+                # cross axis and never expand along the main axis.
+                stretch = "fill"
         if stretch == "fill":
             cross = "y" if layout == "hbox" else "x"
             parts.append(f'fill="{cross}"')
