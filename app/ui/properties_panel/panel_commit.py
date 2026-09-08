@@ -885,7 +885,12 @@ class CommitMixin:
                         "property_changed", self.current_id, name,
                         snap_value,
                     )
-        self._refresh_extra_row(pname)
+        if key == "main_axis":
+            # Mode switch changes which extra rows are visible (the
+            # percent value row) — rebuild the whole panel.
+            self._rebuild()
+        else:
+            self._refresh_extra_row(pname)
         if getattr(self, "_suspend_history", False):
             return
         self.project.history.push(
@@ -893,6 +898,56 @@ class CommitMixin:
                 self.current_id, before, after, prop_changes,
             ),
         )
+
+    def _prompt_extra_number(self, pname: str) -> None:
+        """Inline prompt for an x. number row (main-axis percent)."""
+        if self.current_id is None:
+            return
+        node = self.project.get_widget(self.current_id)
+        if node is None:
+            return
+        from app.widgets.extra_params import param_get
+        current = param_get(node, pname, default=50)
+        dialog = tk.Toplevel(self.winfo_toplevel())
+        dialog.title(tr("props.label.percent", "Percent"))
+        dialog.transient(self.winfo_toplevel())
+        safe_grab_set(dialog)
+        dialog.configure(bg="#2b2b2b")
+        dialog.resizable(False, False)
+        tk.Label(
+            dialog, text=tr("props.label.percent", "Percent"),
+            bg="#2b2b2b", fg="#cccccc", font=ui_font(10),
+        ).pack(padx=14, pady=(12, 4), anchor="w")
+        var = tk.StringVar(value=str(current))
+        entry = tk.Entry(
+            dialog, textvariable=var, width=10, bg="#1e1e1e",
+            fg="#e8e8e8", insertbackground="#e8e8e8",
+            relief="flat", highlightthickness=1,
+            highlightbackground="#3a3a3a",
+        )
+        entry.pack(padx=14, pady=(0, 10), anchor="w")
+
+        def _ok():
+            raw = var.get().strip()
+            try:
+                parsed = int(raw)
+            except (TypeError, ValueError):
+                dialog.destroy()
+                return
+            parsed = max(1, min(100, parsed))
+            dialog.destroy()
+            self._commit_prop(pname, parsed)
+
+        btn = tk.Button(
+            dialog, text=tr("prop_commit.ok", "OK"), width=10,
+            bg="#3b8ed0", fg="#ffffff", activebackground="#4f46e5",
+            activeforeground="#ffffff", bd=0, relief="flat",
+            font=ui_font(10, "bold"), command=_ok,
+        )
+        btn.pack(pady=(0, 12))
+        dialog.bind("<Return>", lambda _e: _ok())
+        dialog.bind("<Escape>", lambda _e: dialog.destroy())
+        entry.focus_set()
 
     def _popup_extra_enum_menu_at(
         self, pname: str, x_root: int, y_root: int,

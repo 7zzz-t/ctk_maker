@@ -160,10 +160,20 @@ class SchemaMixin:
     # these rows; edits commit through the x.-prefixed route.
     # ------------------------------------------------------------------
     def _extra_rows_visible(self, node) -> list:
-        from app.widgets.extra_params import extra_rows_for
-        return [
-            r for r in extra_rows_for(node) if r.get("type") != "number"
-        ]
+        from app.widgets.extra_params import (
+            extra_rows_for,
+            main_axis_mode,
+        )
+        rows = []
+        for row in extra_rows_for(node):
+            if row.get("type") == "number":
+                # The percent value row shows only while the mode is
+                # percent (spec §11 main_axis).
+                if main_axis_mode(node) == "percent":
+                    rows.append(row)
+            else:
+                rows.append(row)
+        return rows
 
     def _populate_extra_rows(self, node) -> None:
         rows = self._extra_rows_visible(node)
@@ -191,24 +201,45 @@ class SchemaMixin:
             )
             if self.overlays is None:
                 continue
-            btn = tk.Label(
-                self.tree, text="▾", bg=TREE_BG, fg="#aaaaaa",
-                font=ui_font(12, "bold"), cursor="hand2", borderwidth=0,
-            )
-            btn.bind(
-                "<Button-1>",
-                lambda _e, p=pname, b=btn: self._popup_extra_enum_menu_at(
-                    p, b.winfo_rootx(),
-                    b.winfo_rooty() + b.winfo_height(),
-                ),
-            )
-            self.overlays.add(iid, SLOT_ENUM_BUTTON, btn, place_enum_button)
+            if prop.get("type") == "number":
+                self._add_extra_number_editor(iid, pname)
+            else:
+                btn = tk.Label(
+                    self.tree, text="▾", bg=TREE_BG, fg="#aaaaaa",
+                    font=ui_font(12, "bold"), cursor="hand2",
+                    borderwidth=0,
+                )
+                btn.bind(
+                    "<Button-1>",
+                    lambda _e, p=pname, b=btn:
+                        self._popup_extra_enum_menu_at(
+                            p, b.winfo_rootx(),
+                            b.winfo_rooty() + b.winfo_height(),
+                        ),
+                )
+                self.overlays.add(
+                    iid, SLOT_ENUM_BUTTON, btn, place_enum_button,
+                )
+
+    def _add_extra_number_editor(self, iid: str, pname: str) -> None:
+        """✎ chip for an x. number row — opens the inline prompt."""
+        edit_btn = tk.Label(
+            self.tree, text="✎", bg=TREE_BG, fg="#aaaaaa",
+            font=ui_font(11, "bold"), cursor="hand2", borderwidth=0,
+        )
+        edit_btn.bind(
+            "<Button-1>",
+            lambda _e, p=pname: self._prompt_extra_number(p),
+        )
+        self.overlays.add(iid, SLOT_ENUM_BUTTON, edit_btn, place_enum_button)
 
     def _extra_row_display(self, prop: dict, pname: str, node) -> str:
         from app.widgets.extra_params import param_get
         value = param_get(node, pname)
         if value is None:
             return ""
+        if prop.get("type") == "number":
+            return f"{value}%"
         labels = prop.get("extra_display") or {}
         return str(labels.get(value, value))
 
