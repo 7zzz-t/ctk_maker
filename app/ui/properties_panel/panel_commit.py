@@ -29,6 +29,7 @@ from app.core.commands import (
     ChangeVariableDefaultCommand,
     ExtraParamCommand,
     MultiChangePropertyCommand,
+    MultiExtraParamCommand,
     MultiWidgetPropertyCommand,
 )
 from app.core.i18n import tr
@@ -861,6 +862,10 @@ class CommitMixin:
         re-layouts immediately."""
         if self.current_id is None:
             return
+        batch = getattr(self, "_batch_ids", None)
+        if batch:
+            self._commit_extra_param_batch(pname, value, batch)
+            return
         from app.widgets.extra_params import (
             extra_key,
             param_set,
@@ -898,6 +903,46 @@ class CommitMixin:
                 self.current_id, before, after, prop_changes,
             ),
         )
+
+    def _commit_extra_param_batch(self, pname: str, value, batch_ids) -> None:
+        """Multi-select x. commit (spec §11): fan the param out to every
+        widget in the batch (same widget_type), sync each widget's stock
+        snapshot, and record ONE undo step (MultiExtraParamCommand)."""
+        from app.widgets.extra_params import (
+            extra_key,
+            param_set,
+            sync_stock_snapshot,
+        )
+        key = extra_key(pname)
+        if key is None:
+            return
+        entries: list = []
+        for wid in batch_ids:
+            node = self.project.get_widget(wid)
+            if node is None:
+                continue
+            before = dict(node.extra or {})
+            if not param_set(node, pname, value):
+                continue
+            after = dict(node.extra or {})
+            prop_changes: dict = {}
+            if key == "main_axis" or key.startswith("main_axis."):
+                prop_changes = sync_stock_snapshot(node)
+                for name, (_before, snap_value) in prop_changes.items():
+                    if snap_value is not None:
+                        self.project.event_bus.publish(
+                            "property_changed", wid, name, snap_value,
+                        )
+            entries.append((wid, before, after, prop_changes))
+        if key == "main_axis":
+            # Mode switch changes which extra rows exist (percent value
+            # row) — rebuild so the panel matches every batch node.
+            self._rebuild()
+        else:
+            self._refresh_extra_row(pname)
+        if not entries or getattr(self, "_suspend_history", False):
+            return
+        self.project.history.push(MultiExtraParamCommand(entries))
 
     def _prompt_extra_number(self, pname: str) -> None:
         """Inline prompt for an x. number row (main-axis percent)."""

@@ -235,7 +235,21 @@ class SchemaMixin:
 
     def _extra_row_display(self, prop: dict, pname: str, node) -> str:
         from app.widgets.extra_params import param_get
-        value = param_get(node, pname)
+        batch = getattr(self, "_batch_ids", None)
+        if batch:
+            # Multi-select: show the shared value, or empty when the
+            # batch disagrees (same aggregation rule as stock rows).
+            seen: list = []
+            for wid in batch:
+                n = self.project.get_widget(wid)
+                if n is None:
+                    continue
+                seen.append(param_get(n, pname))
+            if not seen or any(v != seen[0] for v in seen):
+                return ""
+            value = seen[0]
+        else:
+            value = param_get(node, pname)
         if value is None:
             return ""
         if prop.get("type") == "number":

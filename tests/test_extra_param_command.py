@@ -67,3 +67,30 @@ def test_prop_changes_replay_on_undo_and_redo():
     node = project.get_widget(frame.id)
     assert node.extra == {}
     assert node.properties["stretch"] == "fixed"
+
+
+def test_multi_extra_batch_undo_redo():
+    from app.core.commands import MultiExtraParamCommand
+    project, f1 = _project_with_frame()
+    f2 = WidgetNode("CTkFrame", properties={
+        "x": 200, "y": 0, "width": 100, "height": 150,
+        "layout_type": "place",
+    })
+    project.add_widget(f2, document_id=project.documents[0].id)
+    entries = [
+        (f1.id, {}, {"main_axis": {"mode": "percent", "percent": 30}},
+         {"stretch": ("fixed", "grow")}),
+        (f2.id, {}, {"main_axis": {"mode": "percent", "percent": 30}},
+         {"stretch": ("fixed", "grow")}),
+    ]
+    cmd = MultiExtraParamCommand(entries)
+    cmd.redo(project)
+    for frame in (f1, f2):
+        node = project.get_widget(frame.id)
+        assert node.extra == {"main_axis": {"mode": "percent", "percent": 30}}
+        assert node.properties["stretch"] == "grow"
+    cmd.undo(project)
+    for frame in (f1, f2):
+        node = project.get_widget(frame.id)
+        assert node.extra == {}
+        assert node.properties["stretch"] == "fixed"

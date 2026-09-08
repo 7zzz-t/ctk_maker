@@ -248,3 +248,40 @@ class ExtraParamCommand(Command):
 
     def redo(self, project: "Project") -> None:
         self._apply(project, self.after_extra, True)
+
+
+class MultiExtraParamCommand(Command):
+    """Batch equivalent of ``ExtraParamCommand`` for multi-select x.
+    edits (spec §11 rows on several widgets at once): one undo step
+    restores each widget's extra dict AND its stock snapshot fields."""
+
+    def __init__(
+        self,
+        entries: list,
+        # [(widget_id, before_extra, after_extra, prop_changes)]
+    ):
+        self.entries = list(entries)
+        total = len(self.entries)
+        self.description = (
+            f"Change enhancement parameters across {total} widgets"
+        )
+
+    def _apply(self, project: "Project", take_after: bool) -> None:
+        for widget_id, before, after, prop_changes in self.entries:
+            node = project.get_widget(widget_id)
+            if node is None:
+                continue
+            for name, (b, a) in (prop_changes or {}).items():
+                project.update_property(
+                    widget_id, name, a if take_after else b,
+                )
+            node.extra = dict(after if take_after else before)
+            project.event_bus.publish("widget_extra_changed", widget_id)
+        if self.entries:
+            project.select_widget(self.entries[0][0])
+
+    def undo(self, project: "Project") -> None:
+        self._apply(project, False)
+
+    def redo(self, project: "Project") -> None:
+        self._apply(project, True)
