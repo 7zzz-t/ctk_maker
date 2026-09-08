@@ -90,3 +90,78 @@ def test_is_auto_height_legacy_forms():
     # Non-CTkFrame with height 0 is NOT auto.
     label = _widget("CTkLabel", height=0)
     assert ep.is_auto_height(label) is False
+
+
+# ---------------------------------------------------------------------
+# main_axis — percent / remainder resolution
+# ---------------------------------------------------------------------
+def test_main_axis_mode_default_and_override():
+    parent = _frame_parent("vbox")
+    child = _widget("CTkButton", parent=parent)
+    assert ep.main_axis_mode(child) == ep.M_CONTENT
+    ep.param_set(child, "x.main_axis", ep.M_PERCENT)
+    assert ep.main_axis_mode(child) == ep.M_PERCENT
+    ep.param_set(child, "x.main_axis.percent", 40)
+    assert ep.main_axis_percent(child) == 40
+
+
+def test_parent_main_axis_depends_on_layout():
+    vbox_parent = _frame_parent("vbox")
+    vchild = _widget("CTkButton", parent=vbox_parent)
+    assert ep.parent_main_axis(vchild) == "height"
+    hbox_parent = _frame_parent("hbox")
+    hchild = _widget("CTkButton", parent=hbox_parent)
+    assert ep.parent_main_axis(hchild) == "width"
+    free = _widget("CTkButton")   # no parent
+    assert ep.parent_main_axis(free) is None
+
+
+def test_parent_main_px_fixed_vs_free():
+    vbox_parent = _frame_parent("vbox", height=200)
+    child = _widget("CTkButton", parent=vbox_parent)
+    assert ep.parent_main_px(child) == 200
+    # Scrollable-frame content axis is free.
+    sf = WidgetNode("CTkScrollableFrame", properties={
+        "layout_type": "vbox", "height": 520,
+    })
+    sf_child = _widget("CTkButton", parent=sf)
+    assert ep.parent_main_px(sf_child) is None
+    # Auto-height parent (extra) is free.
+    auto_parent = _frame_parent("vbox", height=200)
+    auto_parent.extra = {"height_mode": "auto"}
+    auto_child = _widget("CTkButton", parent=auto_parent)
+    assert ep.parent_main_px(auto_child) is None
+    # Height 0 parent is free.
+    zero_parent = _frame_parent("vbox", height=0)
+    zero_child = _widget("CTkButton", parent=zero_parent)
+    assert ep.parent_main_px(zero_child) is None
+
+
+def test_percent_px_rounds_against_fixed_parent():
+    parent = _frame_parent("vbox", height=200)
+    child = _widget("CTkButton", parent=parent)
+    ep.param_set(child, "x.main_axis", ep.M_PERCENT)
+    ep.param_set(child, "x.main_axis.percent", 40)
+    assert ep.percent_px(child, 200) == 80
+    assert ep.percent_px(child, None) is None
+    content = _widget("CTkButton", parent=parent)
+    assert ep.percent_px(content, 200) is None
+
+
+def test_stock_stretch_snapshot_rules():
+    parent = _frame_parent("vbox", height=200)
+    percent_child = _widget("CTkButton", parent=parent)
+    ep.param_set(percent_child, "x.main_axis", ep.M_PERCENT)
+    assert ep.stock_stretch_snapshot(percent_child) == "grow"
+    remain_child = _widget("CTkButton", parent=parent)
+    ep.param_set(remain_child, "x.main_axis", ep.M_REMAIN)
+    assert ep.stock_stretch_snapshot(remain_child) == "grow"
+    # Free-axis parent → no snapshot override (child keeps its stretch).
+    sf = WidgetNode("CTkScrollableFrame", properties={
+        "layout_type": "vbox", "height": 520,
+    })
+    sf_child = _widget("CTkButton", parent=sf)
+    ep.param_set(sf_child, "x.main_axis", ep.M_PERCENT)
+    assert ep.stock_stretch_snapshot(sf_child) is None
+    content_child = _widget("CTkButton", parent=parent)
+    assert ep.stock_stretch_snapshot(content_child) is None

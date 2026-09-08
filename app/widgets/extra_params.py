@@ -146,3 +146,88 @@ def is_auto_height(node) -> bool:
         )
     except (TypeError, ValueError):
         return False
+
+
+# ---------------------------------------------------------------------
+# main_axis — percent / remainder distribution inside a vbox/hbox
+# ---------------------------------------------------------------------
+def main_axis_mode(node, default: str = M_CONTENT) -> str:
+    """Distribution mode of a vbox/hbox child along the parent's main
+    axis: ``content`` (natural size), ``percent`` (share of the parent's
+    fixed main-axis size) or ``remain`` (take the leftover, split evenly
+    among several remainders)."""
+    if node is None:
+        return default
+    bucket = (node.extra or {}).get(MAIN_AXIS)
+    if not isinstance(bucket, dict):
+        return default
+    mode = bucket.get("mode")
+    return mode if mode in (M_CONTENT, M_PERCENT, M_REMAIN) else default
+
+
+def main_axis_percent(node, default: int = 50) -> int:
+    """Percent value for a ``percent`` child (1–100)."""
+    if node is None:
+        return default
+    bucket = (node.extra or {}).get(MAIN_AXIS)
+    if not isinstance(bucket, dict):
+        return default
+    try:
+        return int(bucket.get("percent", default))
+    except (TypeError, ValueError):
+        return default
+
+
+def parent_main_axis(node) -> str | None:
+    """Main axis of the child's parent layout: vbox → height, hbox →
+    width. None when the parent isn't a pack container."""
+    if node is None or node.parent is None:
+        return None
+    lt = node.parent.properties.get("layout_type")
+    if lt == "vbox":
+        return "height"
+    if lt == "hbox":
+        return "width"
+    return None
+
+
+def parent_main_px(node) -> int | None:
+    """The parent's FIXED main-axis size in doc units, or None when the
+    axis is free (content-sized) — percent/remain then degrade to
+    ``content``. Free cases: scrollable-frame content (parent IS a
+    CTkScrollableFrame) and auto-height/free-sized plain frames."""
+    axis = parent_main_axis(node)
+    if axis is None or node is None or node.parent is None:
+        return None
+    parent = node.parent
+    if parent.widget_type == "CTkScrollableFrame":
+        return None
+    try:
+        size = int(parent.properties.get(axis, 0) or 0)
+    except (TypeError, ValueError):
+        return None
+    if size <= 0:
+        return None
+    if axis == "height" and is_auto_height(parent):
+        return None
+    return size
+
+
+def percent_px(node, parent_px: int | None) -> int | None:
+    """Computed main-axis px for a ``percent`` child, or None when the
+    child isn't percent / the parent has no fixed axis."""
+    if parent_px is None or parent_px <= 0:
+        return None
+    if main_axis_mode(node) != M_PERCENT:
+        return None
+    return max(1, round(parent_px * max(1, min(100, main_axis_percent(node))) / 100))
+
+
+def stock_stretch_snapshot(node) -> str | None:
+    """Stock ``stretch`` value a percent/remain child degrades to on
+    disk (spec §11.5): fixed-axis parent → ``grow`` (closest stock
+    meaning); free-axis parent → None (leave the child's own stretch)."""
+    mode = main_axis_mode(node)
+    if mode not in (M_PERCENT, M_REMAIN):
+        return None
+    return "grow" if parent_main_px(node) is not None else None
