@@ -409,13 +409,19 @@ class WidgetLifecycle:
 
     @staticmethod
     def _auto_height(node) -> bool:
-        """Auto-height container: the first-class ``height_mode=auto``
-        param (spec §11) OR the legacy CTkFrame height<=0 convention.
-        Height is driven by content instead of a fixed number, so the
-        container can exceed a scrollable viewport and scroll.
+        """Height 0 (or unset/None) on a CTkFrame means auto: the
+        container's height is driven by its content instead of a fixed
+        number, so it can exceed a scrollable viewport and scroll.
         """
-        from app.widgets.extra_params import is_auto_height
-        return is_auto_height(node)
+        if node is None:
+            return False
+        props = node.properties
+        if props is None:
+            return False
+        try:
+            return int(props.get("height", 0) or 0) <= 0
+        except (TypeError, ValueError):
+            return True
 
     def _disable_container_propagate(
         self, widget, anchor_widget, descriptor, node=None,

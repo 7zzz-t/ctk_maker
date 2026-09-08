@@ -1,8 +1,8 @@
 # 02 布局增强 · 原版兼容与双向映射规范
 
 > 状态：**已定稿**（决策 `dec-2a1e1e272d3a092a`：兼容口径 = 语义/行为一致）
-> 适用范围：02 相对原版 00 的**一切布局增强**（容器默认拉伸、百分比/剩余分配、
-> auto 高度、flex 收缩等），以及导出 .py 的内容约束
+> 适用范围：02 相对原版 00 的**一切布局增强**（主轴百分比/剩余分配、磁盘烘焙
+> 快照；auto 高度曾实现、已按 `dec-c38f4c7beb71fa68` 回退），以及导出 .py 的内容约束
 > 日期：2026-09-08
 
 ---
@@ -63,7 +63,7 @@
 | stretch="grow" | `stretch="grow"` | 直落 |
 | 主轴 40% / 剩余 ×N | 私有键（见下）+ **磁盘烘焙**：`fill` + 精确主轴 px（见 §11.8，替代早期 grow 近似） | 烘焙快照 |
 | grid 子 "贴边/铺满" | `grid_sticky` 原值（00 原生） | 直落 |
-| auto-height（height=0） | 见"存量盘点"待办，需确认 00 对 height=0 的读取/面板行为 | 待专项核实 |
+| auto-height（height=0） | 已回退删除（`dec-c38f4c7beb71fa68`）；00 legacy `<=0` 保留 | — |
 
 **降级原则**：00 打开 02 文件时永远看到"最近似的原版语义"；02 再次打开时若
 发现私有键，用私有键恢复精确表达；私有键丢失/被清理 → 自动降级为快照值，
@@ -144,7 +144,7 @@
 
 | 候选值 | 判定 | 说明 |
 |---|---|---|
-| `CTkFrame height=0`（auto 语义，e231ab8 放行） | **已实施 ③ 映射**（决策 `dec-0f67cc2227ac0d14`，第一版实测崩后修订） | 00 实测一：加载无报错、H 格 0、画布不可见；实测二：marker 放 `properties` 会崩（`not supported arguments`）→ 最终形态：`to_dict` 把 `height=0` 写为 `height=200`（properties，保持 CTk 可构造）+ **顶层** `_ctkmaker_auto_height:true`；`from_dict` 还原 0。00 打开 = 可见固定高 frame；00 另存会丢顶层键 → 节点降级为 200 固定高（预期）；02 重开（未另存）恢复 auto。旧裸 0 文件加载即 auto、保存自动升级。见 `app/core/widget_node.py`。 |
+| `CTkFrame height=0`（auto 语义，e231ab8 放行） | **已回退删除**（`dec-c38f4c7beb71fa68`） | 历史：曾实施 200+marker 磁盘映射（`dec-0f67cc2227ac0d14`/`7783611`），00 侧实测通过；经需求实测（子内容受父约束、无法扩出父容器）后于 2026-09-09 **整体删除**该功能（含 marker 序列化、导出省略 height、H 联动）。现状：`height` clamp 恢复 ≥1，旧 marker/0 文件按普通固定高加载；00 基线 legacy `height<=0` 行为未动。 |
 | 受管 vbox/grid 子 x/y 缺失（cc19a26 删除） | 无风险 | 00 对 pack/grid 子不读 x/y；缺省即默认，渲染由父布局决定。 |
 | grid 容器 `grid_rows/cols` 增长值 | 无风险 | 00 原生键、int、同 schema（min1 max50 两边一致）。 |
 | `stretch` / `grid_sticky` 等 | 无风险 | 00 原生三值/组合，两版同源。 |
@@ -200,52 +200,47 @@
   `properties`**（00 全量传 CTk 构造器会崩，见第三节）。
 - 00 另存按白名单丢弃顶层键 → 节点降级为快照值（预期，见第六节）。
 
-### 11.3 参数清单 v1
+### 11.3 参数清单（现行）
 
-| 参数 | 适用 | 取值 | 语义 | 原版快照 |
+| 参数 | 适用 | 取值 | 语义 | 原版快照/磁盘 |
 |---|---|---|---|---|
-| `height_mode` | CTkFrame | `fixed`(默认) / `auto` | auto=内容决定高 | auto → `height=快照(200)`；fixed → `height` 正常 |
-| `main_axis.mode` | vbox/hbox 子 | `content`(默认) / `percent` / `remain` | content=自然；percent=父主轴 N%；remain=吃剩余 | `stretch`：percent/remain 定高父→`grow`，自由轴父→`fixed` |
+| `main_axis.mode` | vbox/hbox 子 | `content`(默认) / `percent` / `remain` | content=自然；percent=父主轴 N%；remain=吃剩余 | 内存/导出 `stretch:grow`（响应式）；磁盘烘焙 `fill`+精确 px（§11.8） |
 | `main_axis.percent` | 同上 | 1–100 | 仅 mode=percent 生效 | 见上 |
+
+> **已回退**（`dec-c38f4c7beb71fa68`，2026-09-09）：原 v1 曾含 `height_mode`
+> （auto 高度）参数与 `height=0`/200+marker 磁盘映射，经实测确认后**全部删除**。
+> 00 基线自身的 legacy `height<=0` 行为保持不变。
 
 ### 11.4 UI（仅 02 显示，00 面板天然无这些行）
 
-- 容器 Layout 组新增：「高度模式：固定 | 自动」（CTkFrame）；
-- vbox/hbox 子的「拉伸」行改造为「主轴：内容 | 百分比 | 剩余」，percent 时出现
-  数值行（1–100，步进 5）；受管/多选/禁用规则沿用 `managed_geometry_disabled` 同源；
-- **退役**：CTkFrame 不再用 H=0 表达 auto（H 行恢复 clamp ≥1），「高度模式：自动」
-  是新入口。
+- vbox/hbox 子的 Layout 组尾部：「主轴：内容 | 百分比 | 剩余」，percent 时出现
+  数值行（1–100）；批量同值/异值汇总、undo 见实施记录。
 
 ### 11.5 导出（不残留，静态化）
 
-- auto（height_mode=auto）→ 省略 `height` configure（现状）；
 - percent（定高父）→ 导出时按父主轴固定尺寸**静态算 px**：
   `h_px = round(parent_main_px × percent/100)` → 写 `configure(height=h_px)`；
 - remain → `stretch="grow"`（运行时框架均分剩余，零残留）；
-- percent 在 auto/滚动/内容父 → 降级 content（与编辑器一致）。
+- percent/remain 在自由轴父（scroll 内容 / 高度 0）→ 降级 content（与编辑器一致）。
 
 ### 11.6 迁移
 
-- 旧顶层 `_ctkmaker_auto_height`（marker 形态）→ 加载转 `extra.height_mode="auto"`；
-- 旧裸 `height=0` 文件 → 加载即视为 auto（与既有行为一致）；
-- 存量文件下次保存自动升级为新参数形态。
+- 旧文件若残留顶层 `_ctkmaker_auto_height` / `height=0`（auto 时代产物）→ 现在
+  **按普通固定高加载**（marker 忽略、0 由 clamp 不再产生）；如需自动语义请回退到
+  auto 时代的 02 版本——当前版本已无该功能。
 
 ### 11.7 实施阶段（对应任务清单）
 
-1. `WidgetNode.extra` + `_ctkmaker_meta` 序列化与迁移 —— **完成**
-   （`65410bd`，含 extra 顶层存储与递归还原）；
-2. 面板 extra 行注入/编辑（含多选批量）—— **完成**
-   （`81e3ef1` enum 行 + `8cec00f` percent 数值行 + `e818ce1` 批量扇出/
-   `MultiExtraParamCommand` + `5b0773c` 选项汉化 + `3e33205` 并入 Layout 组 +
-   `8e6af5c` auto 态钉 H 退出 auto 的联动）；禁用/灰显细节列 v2 打磨；
-3. auto-height 重构为 `height_mode` —— **完成**
-   （`5bc5aaf`：画布/导出读 `is_auto_height`；extra-auto 导出省略 height；
-   `3c322c6` rebalance 跳过 auto 父）；
+1. `WidgetNode.extra` + `_ctkmaker_meta` 序列化与迁移 —— **完成**（`65410bd`）；
+2. 面板 extra 行（主轴 enum + percent 数值）、批量扇出/汇总/undo —— **完成**
+   （`81e3ef1`/`8cec00f`/`e818ce1`/`5b0773c`/`3e33205`）；禁用/灰显细节列 v2；
+3. auto-height（height_mode）—— **已按 `dec-c38f4c7beb71fa68` 回退删除**
+   （含磁盘 200+marker 映射、导出省略 height、H 联动、相关测试；提交 `8e6af5c` 撤销）；
 4. `main_axis` percent/remain 计算与导出静态化 —— **完成**
-   （`5a93805` 快照同步 stretch:grow；`3c322c6` 画布 percent 固定预算；
-   `f79c1cd` 导出精确 px）；
-5. 兼容回归 + 全量测试 + 文档收口 —— 代码侧完成（§8 阻塞标注、§9.4 缺陷记录、
-   本节收口）；**00 人工回归**（auto/percent 文件在 00 的观感，避 §9.4 结构）待做。
+   （`5a93805` 内存快照 grow → `3c322c6` 画布预算 → `f79c1cd` 导出 px）；
+5. 磁盘烘焙（fill+px，替代 grow 近似）—— **完成**（`2301a75`）；
+6. 兼容回归 + 全量测试 + 文档收口 —— 代码侧完成（§8 阻塞标注、§9.4 缺陷记录、
+   本节收口）；00 人工回归待做。
 
 ### 11.8 percent / remain 最终语义（一页速查）
 
@@ -258,7 +253,7 @@
 | 场景 | percent | remain |
 |---|---|---|
 | 定高父（CTkFrame vbox/hbox） | 画布/导出按 px 固定；**磁盘烘焙 stretch=fill + px** | 内存/画布 grow 池均分；**磁盘烘焙 fill + 均分后 px** |
-| 自由轴父（scroll 内容 / auto） | 不烘焙（磁盘保留自身 stretch/尺寸）；02 侧降级 content | 同左 |
+| 自由轴父（scroll 内容 / 高度 0） | 不烘焙（磁盘保留自身 stretch/尺寸）；02 侧降级 content | 同左 |
 | 00 打开文件 | 静态 fill + 精确 px（与 02 画布逐像素一致） | 同左（非响应式） |
 | 00 编辑另存 | 顶层 extra 被丢弃 → 节点降级为烘焙后的固定形态（预期） | 同左 |
 
@@ -276,3 +271,7 @@
 - 2026-09-09：收口补链 —— 批量 x.（`e818ce1`）、§8 core 阻塞标注与选项汉化
   （`5b0773c`）、extra 行并入 Layout 组（`3e33205`）、auto 态钉 H 退出 auto（`8e6af5c`）；
   §9.4 记录 00 的 place+composite 缺陷（`4ea7c16`）。
+- 2026-09-09：磁盘烘焙快照（`2301a75`：percent/remain → fill+精确 px，替代 grow 近似）。
+- 2026-09-09：**auto-height（height_mode）整体回退删除**（`dec-c38f4c7beb71fa68`：
+  需求实测确认子内容受父约束无法扩出父容器，功能无效）——撤 extra 参数/磁盘
+  200+marker/导出省略 height/H 联动/clamp 放行及相关测试；percent/remain 与烘焙保留。

@@ -569,16 +569,10 @@ class LayoutOverlayManager:
         # grids / clipped checkboxes inside CTkScrollableFrame).
         if getattr(parent_node, "widget_type", "") == "CTkScrollableFrame":
             return
-        # Auto-height containers (spec §11, first-class or legacy) are
-        # content-sized too: their properties.height is a stock snapshot,
-        # not a real distribution budget.
         from app.widgets.extra_params import (
-            is_auto_height,
             main_axis_mode,
             main_axis_percent,
         )
-        if is_auto_height(parent_node):
-            return
         all_siblings = list(parent_node.children)
         if not all_siblings:
             return

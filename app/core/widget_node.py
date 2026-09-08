@@ -9,22 +9,10 @@ _WIDGET_TYPE_RENAMES = {
     "Shape": "Card",  # 2026-04-27: Shape → Card
 }
 
-# Builder-only disk carriers for 02 features stock CTkMaker (00) can't
-# express. In-memory, a CTkFrame ``height == 0`` means "auto-height"
-# (content-sized container); stock 00 renders 0-height frames as
-# invisible, so on disk we write a visible snapshot height plus a
-# marker. The marker MUST live at the widget's TOP level, NOT inside
-# ``properties``: stock 00 hands every ``properties`` key to the CTk
-# constructor (``create_widget``), so an unknown property key crashes
-# with "not supported arguments". Unknown top-level keys are ignored by
-# 00's loader (it only reads keys it knows); 00's saver drops them on
-# the next save, which degrades the file to the fixed snapshot height.
-_CTKFRAME_AUTO_HEIGHT_KEY = "_ctkmaker_auto_height"
-_CTKFRAME_AUTO_HEIGHT_SNAPSHOT = 200
 # Single top-level carrier for ALL 02 builder-only enhancement params
 # (see docs/LAYOUT_ENHANCEMENT_COMPAT.md §11). Kept out of
-# ``properties`` for the same reason as the auto-height marker: stock
-# 00 forwards every property key to the CTk constructor.
+# ``properties``: stock 00 forwards every property key to the CTk
+# constructor, so builder-only data must never ride that dict.
 _CTKMETA_KEY = "_ctkmaker_meta"
 
 
@@ -54,8 +42,6 @@ def _bake_pack_child_disk(container, child, child_dict):
     if parent_px <= 0:
         return child_dict
     if getattr(container, "widget_type", "") == "CTkScrollableFrame":
-        return child_dict
-    if (container.extra or {}).get("height_mode") == "auto":
         return child_dict
     try:
         if int(parent_props.get("height", 0) or 0) <= 0:
@@ -237,16 +223,6 @@ class WidgetNode:
         # ``props["image"]`` to an ``asset:images/...`` token and the
         # canvas's PIL.open then choked on a path it couldn't read.
         props = dict(self.properties)
-        disk_auto = (
-            self.widget_type == "CTkFrame"
-            and props.get("height") == 0
-        )
-        if disk_auto:
-            # In-memory 0 = auto-height (content-sized). Disk carries a
-            # visible snapshot height (properties must stay CTk-safe —
-            # stock 00 forwards every property key to the constructor)
-            # plus a top-level marker (see module docstring).
-            props["height"] = _CTKFRAME_AUTO_HEIGHT_SNAPSHOT
         result = {
             "id": self.id,
             "name": self.name,
@@ -259,8 +235,6 @@ class WidgetNode:
                 for c in self.children
             ],
         }
-        if disk_auto:
-            result[_CTKFRAME_AUTO_HEIGHT_KEY] = True
         if self.extra:
             result[_CTKMETA_KEY] = copy.deepcopy(dict(self.extra))
         if self.parent_slot is not None:
@@ -295,17 +269,9 @@ class WidgetNode:
     def from_dict(cls, data: dict) -> "WidgetNode":
         raw_type: str = data["widget_type"]
         widget_type = _WIDGET_TYPE_RENAMES.get(raw_type, raw_type)
-        raw_props = data.get("properties", {})
-        if (
-            widget_type == "CTkFrame"
-            and data.get(_CTKFRAME_AUTO_HEIGHT_KEY)
-        ):
-            # Disk snapshot + top-level marker → in-memory auto (0).
-            raw_props = dict(raw_props)
-            raw_props["height"] = 0
         node = cls(
             widget_type=widget_type,
-            properties=raw_props,
+            properties=data.get("properties", {}),
         )
         node.id = data["id"]
         node.name = data.get("name", "")

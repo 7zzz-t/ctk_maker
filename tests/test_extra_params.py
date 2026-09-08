@@ -1,5 +1,7 @@
-"""Extra-param semantics layer (spec §11): row defs, typed get/set on
-WidgetNode.extra, auto-height detection incl. legacy disk forms."""
+"""Extra-param semantics layer: row defs, typed get/set on
+WidgetNode.extra, main-axis resolution. Auto-height (height_mode) was
+removed on request (decision dec-c38f4c7beb71fa68) — these cover the
+remaining first-class param, main_axis percent/remain."""
 from __future__ import annotations
 
 from app.core.widget_node import WidgetNode
@@ -24,23 +26,21 @@ def _frame_parent(layout="vbox", height=200):
 
 
 def test_ui_name_roundtrip():
-    assert ep.ui_name("height_mode") == "x.height_mode"
-    assert ep.extra_key("x.height_mode") == "height_mode"
-    assert ep.extra_key("height_mode") is None
+    assert ep.ui_name("main_axis") == "x.main_axis"
+    assert ep.extra_key("x.main_axis") == "main_axis"
+    assert ep.extra_key("main_axis") is None
 
 
-def test_ctkframe_rows_include_height_mode_only():
+def test_plain_ctkframe_has_no_extra_rows():
+    # No parent layout → no main-axis rows (height_mode was removed).
     frame = _widget("CTkFrame", height=150)
-    names = [r["name"] for r in ep.extra_rows_for(frame)]
-    assert "x.height_mode" in names
-    assert "x.main_axis" not in names
+    assert ep.extra_rows_for(frame) == []
 
 
 def test_vbox_child_gets_main_axis_rows():
     parent = _frame_parent("vbox")
     child = _widget("CTkFrame", parent=parent, height=40)
     names = [r["name"] for r in ep.extra_rows_for(child)]
-    assert "x.height_mode" in names          # still a CTkFrame
     assert "x.main_axis" in names
     assert "x.main_axis.percent" in names
 
@@ -54,11 +54,11 @@ def test_place_child_gets_no_main_axis():
 
 def test_param_set_get_roundtrip():
     node = _widget("CTkFrame", height=150)
-    assert ep.param_set(node, "x.height_mode", ep.H_AUTO) is True
-    assert ep.param_get(node, "x.height_mode") == ep.H_AUTO
-    assert node.extra == {"height_mode": "auto"}
+    assert ep.param_set(node, "x.main_axis", ep.M_CONTENT) is True
+    assert ep.param_get(node, "x.main_axis") == ep.M_CONTENT
+    assert node.extra == {"main_axis": {"mode": "content"}}
     # Setting the same value again reports no change.
-    assert ep.param_set(node, "x.height_mode", ep.H_AUTO) is False
+    assert ep.param_set(node, "x.main_axis", ep.M_CONTENT) is False
 
 
 def test_nested_percent_param():
@@ -71,30 +71,6 @@ def test_nested_percent_param():
     assert ep.param_get(child, "x.main_axis.percent", default=10) == 40
 
 
-def test_is_auto_height_first_class():
-    node = _widget("CTkFrame", height=150)
-    assert ep.is_auto_height(node) is False
-    ep.param_set(node, "x.height_mode", ep.H_AUTO)
-    assert ep.is_auto_height(node) is True
-    ep.param_set(node, "x.height_mode", ep.H_FIXED)
-    assert ep.is_auto_height(node) is False
-
-
-def test_is_auto_height_legacy_forms():
-    # Pre-height_mode: height == 0 and top-level disk marker.
-    zero = _widget("CTkFrame", height=0)
-    assert ep.is_auto_height(zero) is True
-    marker = _widget("CTkFrame", height=200)
-    marker._ctkmaker_auto_height = True
-    assert ep.is_auto_height(marker) is True
-    # Non-CTkFrame with height 0 is NOT auto.
-    label = _widget("CTkLabel", height=0)
-    assert ep.is_auto_height(label) is False
-
-
-# ---------------------------------------------------------------------
-# main_axis — percent / remainder resolution
-# ---------------------------------------------------------------------
 def test_main_axis_mode_default_and_override():
     parent = _frame_parent("vbox")
     child = _widget("CTkButton", parent=parent)
@@ -126,11 +102,6 @@ def test_parent_main_px_fixed_vs_free():
     })
     sf_child = _widget("CTkButton", parent=sf)
     assert ep.parent_main_px(sf_child) is None
-    # Auto-height parent (extra) is free.
-    auto_parent = _frame_parent("vbox", height=200)
-    auto_parent.extra = {"height_mode": "auto"}
-    auto_child = _widget("CTkButton", parent=auto_parent)
-    assert ep.parent_main_px(auto_child) is None
     # Height 0 parent is free.
     zero_parent = _frame_parent("vbox", height=0)
     zero_child = _widget("CTkButton", parent=zero_parent)

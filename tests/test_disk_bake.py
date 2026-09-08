@@ -92,8 +92,8 @@ def test_hbox_bakes_width():
     assert child_disk["properties"]["stretch"] == "fill"
 
 
-def test_no_bake_for_free_axis_parents():
-    # Scroll content and auto-height parents have no fixed baseline.
+def test_no_bake_for_scroll_parent():
+    # Scroll content has no fixed baseline.
     sf = WidgetNode("CTkScrollableFrame", properties={
         "layout_type": "vbox", "width": 300, "height": 520,
     })
@@ -103,12 +103,6 @@ def test_no_bake_for_free_axis_parents():
     disk = sf.to_dict()
     child_disk = disk["children"][0]
     assert child_disk["properties"].get("height") == 40
-    assert child_disk["properties"].get("stretch") is None
-
-    auto_parent = _vbox([_remain()], height=300)
-    auto_parent.extra = {"height_mode": "auto"}
-    disk = auto_parent.to_dict()
-    child_disk = disk["children"][0]
     assert child_disk["properties"].get("stretch") is None
 
 

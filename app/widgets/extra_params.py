@@ -1,15 +1,19 @@
 """First-class 02 enhancement params — semantics layer (spec §11).
 
-02 lets layout authors express things stock CTkMaker can't: auto-height
-containers, percent / remainder main-axis distribution, … These are
+02 lets layout authors express things stock CTkMaker can't: percent /
+remainder main-axis distribution inside vbox/hbox children. These are
 first-class parameters (``WidgetNode.extra``), NOT re-encoded onto
-stock fields like ``height=0``. UI row names carry the ``x.`` prefix so
-they can never collide with real ``properties`` keys (stock 00 forwards
-every property key to the CTk constructor — unknown ones crash).
+stock fields. UI row names carry the ``x.`` prefix so they can never
+collide with real ``properties`` keys (stock 00 forwards every property
+key to the CTk constructor — unknown ones crash).
 
 This module is the single semantic source: row definitions, per-node
 applicability, typed get/set on ``node.extra``, and the stock-field
-snapshot sync used at save / export time.
+snapshot used at save / export time.
+
+Note: auto-height (height_mode) was removed on request (decision
+`dec-c38f4c7beb71fa68`) — the stock legacy ``height <= 0`` handling
+still belongs to 00 and is untouched.
 """
 from __future__ import annotations
 
@@ -18,21 +22,12 @@ from app.core.widget_node import WidgetNode
 # --- UI property-name prefix (never a real properties key) -----------
 UI_PREFIX = "x."
 
-# --- height_mode (CTkFrame containers) --------------------------------
-H_AUTO = "auto"
-H_FIXED = "fixed"
-HEIGHT_MODE = "height_mode"
-
 # --- main_axis (vbox / hbox children) ---------------------------------
 M_CONTENT = "content"   # natural size (stock "fixed" semantics)
 M_PERCENT = "percent"   # share of the parent's fixed main-axis size
 M_REMAIN = "remain"     # take the leftover, evenly split when several
 MAIN_AXIS = "main_axis"
 MAIN_PERCENT = "percent"
-
-# Height given to an auto container when the disk form needs a visible
-# stock height (00 renders 0-height frames as invisible).
-AUTO_HEIGHT_SNAPSHOT = 200
 
 
 def ui_name(extra_key: str) -> str:
@@ -53,15 +48,6 @@ def extra_rows_for(node) -> list[dict]:
     rows: list[dict] = []
     if node is None:
         return rows
-    if node.widget_type == "CTkFrame":
-        rows.append({
-            "name": ui_name(HEIGHT_MODE),
-            "type": "enum",
-            "label": "",
-            "group": "Layout",
-            "row_label": "Height Mode",
-            "extra_options": (H_FIXED, H_AUTO),
-        })
     parent = node.parent
     parent_layout = None
     if parent is not None:
@@ -125,29 +111,6 @@ def param_set(node, ui_name: str, value) -> bool:
     return True
 
 
-def is_auto_height(node) -> bool:
-    """True when the container is in auto-height mode — either via the
-    first-class ``height_mode`` param or legacy ``height == 0`` /
-    top-level ``_ctkmaker_auto_height`` disk markers from earlier 02."""
-    if node is None:
-        return False
-    extra = node.extra or {}
-    mode = extra.get(HEIGHT_MODE)
-    if mode is not None:
-        return mode == H_AUTO
-    if node.widget_type != "CTkFrame":
-        return False
-    # Legacy forms (pre-height_mode). Top-level marker may still sit on
-    # a node loaded from an old file; height==0 is the pre-mapping form.
-    try:
-        return bool(
-            int(node.properties.get("height", 0) or 0) == 0
-            or getattr(node, "_ctkmaker_auto_height", False)
-        )
-    except (TypeError, ValueError):
-        return False
-
-
 # ---------------------------------------------------------------------
 # main_axis — percent / remainder distribution inside a vbox/hbox
 # ---------------------------------------------------------------------
@@ -195,7 +158,7 @@ def parent_main_px(node) -> int | None:
     """The parent's FIXED main-axis size in doc units, or None when the
     axis is free (content-sized) — percent/remain then degrade to
     ``content``. Free cases: scrollable-frame content (parent IS a
-    CTkScrollableFrame) and auto-height/free-sized plain frames."""
+    CTkScrollableFrame) and any parent with a non-positive size."""
     axis = parent_main_axis(node)
     if axis is None or node is None or node.parent is None:
         return None
@@ -207,8 +170,6 @@ def parent_main_px(node) -> int | None:
     except (TypeError, ValueError):
         return None
     if size <= 0:
-        return None
-    if axis == "height" and is_auto_height(parent):
         return None
     return size
 
@@ -224,9 +185,11 @@ def percent_px(node, parent_px: int | None) -> int | None:
 
 
 def stock_stretch_snapshot(node) -> str | None:
-    """Stock ``stretch`` value a percent/remain child degrades to on
-    disk (spec §11.5): fixed-axis parent → ``grow`` (closest stock
-    meaning); free-axis parent → None (leave the child's own stretch)."""
+    """Stock ``stretch`` value a percent/remain child degrades to for
+    the in-memory / export representation (spec §11): fixed-axis parent
+    → ``grow`` (the responsive runtime meaning — the saved .ctkproj is
+    then baked to fill + exact px by ``widget_node._bake_pack_child_disk``);
+    free-axis parent → None (leave the child's own stretch)."""
     mode = main_axis_mode(node)
     if mode not in (M_PERCENT, M_REMAIN):
         return None
@@ -234,13 +197,10 @@ def stock_stretch_snapshot(node) -> str | None:
 
 
 def sync_stock_snapshot(node) -> dict:
-    """Write the stock-field snapshot implied by the extra params and
-    return the ``{prop: (before, after)}`` changes applied (empty when
-    nothing moved). Called after an x. commit so the exported / saved
-    stock representation stays 00-compatible (percent/remain on a fixed
-    parent degrade to ``stretch: grow`` — stock's closest "take the
-    leftover" meaning; canvas rebalance and the runtime then behave
-    identically to stock grow distribution)."""
+    """Write the in-memory stock stretch snapshot implied by the extra
+    params and return the ``{prop: (before, after)}`` changes applied
+    (empty when nothing moved). Called after an x. commit so the canvas
+    rebalance / export behave like stock grow distribution."""
     changes: dict = {}
     if node is None:
         return changes
