@@ -132,7 +132,7 @@
 
 | 候选值 | 判定 | 说明 |
 |---|---|---|
-| `CTkFrame height=0`（auto 语义，e231ab8 放行） | **低风险 / 保留** | 00 能加载（int、schema 键内）；00 与 02 导出行为**实测一致**——都省略 `height` 参数（00 侧语义退化为"默认高"，非破坏）；00 画布会把父画成 0 高（子 place 不受裁剪仍可见），仅视觉差异。文件保持 `height=0`，02 重开恢复 auto 语义。 |
+| `CTkFrame height=0`（auto 语义，e231ab8 放行） | **已实施 ③ 映射**（决策 `dec-0f67cc2227ac0d14`） | 00 实测：加载无报错、H 格显示 0、但画布**不可见**（0 高）→ 改为磁盘私有键+快照：`to_dict` 把 `height=0` 写为 `height=200` + `_ctkmaker_auto_height:true`；`from_dict` 还原为 0。00 打开 = 正常可见固定高 frame；02 重开恢复 auto。旧裸 0 文件加载即 auto，保存自动升级。见 `app/core/widget_node.py`。 |
 | 受管 vbox/grid 子 x/y 缺失（cc19a26 删除） | 无风险 | 00 对 pack/grid 子不读 x/y；缺省即默认，渲染由父布局决定。 |
 | grid 容器 `grid_rows/cols` 增长值 | 无风险 | 00 原生键、int、同 schema（min1 max50 两边一致）。 |
 | `stretch` / `grid_sticky` 等 | 无风险 | 00 原生三值/组合，两版同源。 |

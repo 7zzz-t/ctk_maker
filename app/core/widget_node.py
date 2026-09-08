@@ -9,6 +9,16 @@ _WIDGET_TYPE_RENAMES = {
     "Shape": "Card",  # 2026-04-27: Shape → Card
 }
 
+# Builder-only disk carriers for 02 features stock CTkMaker (00) can't
+# express. In-memory, a CTkFrame ``height == 0`` means "auto-height"
+# (content-sized container); stock 00 renders 0-height frames as
+# invisible, so on disk we write a visible snapshot height plus this
+# marker key. 02 restores ``height = 0`` on load; stock 00 ignores the
+# unknown key (universal properties dict, schema-driven rendering) and
+# simply sees a normal fixed-height frame.
+_CTKFRAME_AUTO_HEIGHT_KEY = "_ctkmaker_auto_height"
+_CTKFRAME_AUTO_HEIGHT_SNAPSHOT = 200
+
 
 def clean_component_dict(raw) -> dict | None:
     """Validate one serialised CTkScript component entry from a
@@ -119,11 +129,21 @@ class WidgetNode:
         # widget. Without this, ``_walk_widget_tokenize`` rewrote
         # ``props["image"]`` to an ``asset:images/...`` token and the
         # canvas's PIL.open then choked on a path it couldn't read.
+        props = dict(self.properties)
+        if (
+            self.widget_type == "CTkFrame"
+            and props.get("height") == 0
+        ):
+            # In-memory 0 = auto-height (content-sized). Disk carries a
+            # visible snapshot height + marker so stock 00 opens the
+            # frame as a normal visible widget (see module docstring).
+            props["height"] = _CTKFRAME_AUTO_HEIGHT_SNAPSHOT
+            props[_CTKFRAME_AUTO_HEIGHT_KEY] = True
         result = {
             "id": self.id,
             "name": self.name,
             "widget_type": self.widget_type,
-            "properties": dict(self.properties),
+            "properties": props,
             "visible": self.visible,
             "locked": self.locked,
             "children": [c.to_dict() for c in self.children],
@@ -160,9 +180,18 @@ class WidgetNode:
     def from_dict(cls, data: dict) -> "WidgetNode":
         raw_type: str = data["widget_type"]
         widget_type = _WIDGET_TYPE_RENAMES.get(raw_type, raw_type)
+        raw_props = data.get("properties", {})
+        if (
+            widget_type == "CTkFrame"
+            and raw_props.get(_CTKFRAME_AUTO_HEIGHT_KEY)
+        ):
+            # Disk snapshot + marker → in-memory auto-height (0).
+            raw_props = dict(raw_props)
+            raw_props["height"] = 0
+            raw_props.pop(_CTKFRAME_AUTO_HEIGHT_KEY, None)
         node = cls(
             widget_type=widget_type,
-            properties=data.get("properties", {}),
+            properties=raw_props,
         )
         node.id = data["id"]
         node.name = data.get("name", "")
