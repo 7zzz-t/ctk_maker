@@ -201,11 +201,27 @@
 
 ### 11.7 实施阶段（对应任务清单）
 
-1. `WidgetNode.extra` + `_ctkmaker_meta` 序列化与迁移；
-2. 面板 extra 行注入/编辑（含多选批量）；
-3. auto-height 重构为 `height_mode`（画布/导出/commit 读 extra）；
-4. `main_axis` percent/remain 计算与导出静态化；
-5. 兼容回归 + 全量测试 + 文档收口。
+1. `WidgetNode.extra` + `_ctkmaker_meta` 序列化与迁移 —— **完成**
+   （`65410bd`，含 extra 顶层存储与递归还原）；
+2. 面板 extra 行注入/编辑（含多选批量）—— **行注入与编辑完成**
+   （`81e3ef1` enum 行 + `8cec00f` percent 数值行）；多选 x. 批量未做（v2）；
+3. auto-height 重构为 `height_mode` —— **完成**
+   （`5bc5aaf`：画布/导出读 `is_auto_height`；extra-auto 导出省略 height；
+   `3c322c6` rebalance 跳过 auto 父）；
+4. `main_axis` percent/remain 计算与导出静态化 —— **完成**
+   （`5a93805` 快照同步 stretch:grow；`3c322c6` 画布 percent 固定预算；
+   `f79c1cd` 导出精确 px）；
+5. 兼容回归 + 全量测试 + 文档收口 —— 进行中（本节收口；
+   00 人工回归见 §9.2 的记录方法）。
+
+### 11.8 percent / remain 最终语义（一页速查）
+
+| 场景 | percent | remain |
+|---|---|---|
+| 定高父（CTkFrame vbox/hbox） | 画布与导出按 `round(父px×pct%)` 固定；快照 `stretch=grow` | 进 grow 池均分剩余；快照 `stretch=grow` |
+| 自由轴父（scroll 内容 / auto） | 降级 content（保持自身尺寸） | 降级 content（随 grow/fixed 快照行为） |
+| 00 打开文件 | 看到固定高 + stretch=grow（近似，非精确 40%） | 与 grow 一致 |
+| 00 编辑另存 | 顶层 extra 被丢弃 → 降级为快照值（预期） | 同左 |
 
 ---
 
@@ -215,3 +231,6 @@
 - 2026-09-08：私有键位置修订（node 顶层，禁入 properties —— 00 全量传参崩溃实测）；
   auto-height 磁盘映射实施（`dec-0f67cc2227ac0d14`）与修订（`7783611`）。
 - 2026-09-08：新增第十一节「增强参数机制」设计（`dec-aa6eedbd648307d7`，一步到位全做）。
+- 2026-09-08：§11 实施完成 —— extra 存储、面板行（enum+percent 数值）、auto-height
+  first-class（画布/导出/快照）、percent/remain 画布预算与导出精确 px（提交链
+  `65410bd → 81e3ef1 → 5bc5aaf → 5a93805 → 3c322c6 → f79c1cd → 8cec00f`）。
