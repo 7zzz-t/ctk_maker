@@ -28,6 +28,7 @@ from app.core.commands import (
     ChangePropertyCommand,
     ChangeVariableDefaultCommand,
     MultiChangePropertyCommand,
+    MultiWidgetPropertyCommand,
 )
 from app.core.i18n import tr
 from app.ui.system_fonts import ui_font
@@ -38,6 +39,7 @@ from app.ui.icons import load_tk_icon
 from app.widgets.layout_schema import (
     LAYOUT_DISPLAY_NAMES,
     LAYOUT_ICON_NAMES,
+    plan_grid_shrink_relocation,
 )
 from tools.text_editor_dialog import TextEditorDialog
 
@@ -711,10 +713,22 @@ class CommitMixin:
         # Grid shrink guard — block grid_rows/grid_cols going below the
         # max row/column index actually occupied by a child, otherwise
         # children silently disappear from the canvas (still in the
-        # model, just out-of-bounds for the new grid).
+        # model, just out-of-bounds for the new grid). Instead of
+        # erroring on every attempt, first try to auto-repair: park the
+        # out-of-bounds children into free cells of the smaller grid
+        # and commit the shrink as one undo step — no dialog. Only when
+        # the smaller grid genuinely has no room does the error surface.
         if pname in ("grid_rows", "grid_cols"):
             ok, msg = self._validate_grid_shrink(node, pname, value)
             if not ok:
+                planned, relocations = plan_grid_shrink_relocation(
+                    node, pname, int(value),
+                )
+                if planned:
+                    self._apply_grid_shrink_relocation(
+                        node, pname, int(value), relocations,
+                    )
+                    return
                 show_error(
                     tr("prop_commit.cannot_shrink_grid", "Cannot shrink grid"), msg,
                     parent=self.winfo_toplevel(),
@@ -891,6 +905,39 @@ class CommitMixin:
                 )
             )
         return True, ""
+
+    def _apply_grid_shrink_relocation(
+        self, node, pname: str, new_val: int, relocations,
+    ) -> None:
+        """Commit a grid shrink together with its auto-repair moves.
+
+        ``relocations`` comes from ``plan_grid_shrink_relocation`` —
+        out-of-bounds children parked into free cells of the smaller
+        grid. The container dimension change and every child's cell
+        move are applied and bundled into ONE undo entry, so Ctrl+Z
+        reverses the whole shrink in a single step (the same way the
+        plain grid_rows/grid_cols edit is one step).
+        """
+        entries: list[tuple] = [(
+            node.id,
+            {pname: (node.properties.get(pname), new_val)},
+        )]
+        for child, row, col in relocations:
+            changes = {}
+            old_row = child.properties.get("grid_row")
+            old_col = child.properties.get("grid_column")
+            if old_row != row:
+                changes["grid_row"] = (old_row, row)
+            if old_col != col:
+                changes["grid_column"] = (old_col, col)
+            if changes:
+                entries.append((child.id, changes))
+        for widget_id, changes in entries:
+            for name, (_before, after) in changes.items():
+                self.project.update_property(widget_id, name, after)
+        if getattr(self, "_suspend_history", False):
+            return
+        self.project.history.push(MultiWidgetPropertyCommand(entries))
 
     def _refresh_row_after_reject(self, pname: str) -> None:
         """Repaint the schema row for ``pname`` so the spinner / inline

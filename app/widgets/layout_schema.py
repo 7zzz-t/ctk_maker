@@ -417,3 +417,64 @@ def resolve_grid_drop_cell(
         new_cell = (0, cols)
     dim_updates = {"grid_rows": new_rows, "grid_cols": new_cols}
     return new_cell[0], new_cell[1], dim_updates
+
+
+def plan_grid_shrink_relocation(node, pname: str, new_val):
+    """Auto-repair plan for shrinking a grid container's rows / cols.
+
+    Shrinking ``grid_rows`` / ``grid_cols`` below the highest row /
+    column a child occupies would silently drop that child out of the
+    visible grid (it stays in the model, just out-of-bounds). Instead
+    of blocking the shrink — which pops an error dialog on every
+    attempt until the user manually moves or deletes the widget — the
+    panel can relocate those out-of-bounds children into free cells of
+    the smaller grid and commit the shrink normally.
+
+    Returns one of:
+
+    - ``(True, [])`` — nothing is out of bounds; plain shrink.
+    - ``(True, relocations)`` — every out-of-bounds child can be
+      parked in an in-bounds free cell. ``relocations`` is a list of
+      ``(child, row, col)``: out-of-bounds children in z-order, each
+      mapped to the row-major first free cell of the new grid.
+      In-bounds children keep their cell untouched.
+    - ``(False, None)`` — the smaller grid has no free cell for at
+      least one out-of-bounds child; the caller must surface an error
+      (the user has to delete or move widgets before shrinking).
+
+    Pure function: never mutates the tree, so callers can preview and
+    then apply everything as one undo step.
+    """
+    rows, cols = grid_effective_dims(
+        len(node.children), node.properties,
+    )
+    if pname == "grid_rows":
+        rows = max(1, _safe_int(new_val, 1))
+    elif pname == "grid_cols":
+        cols = max(1, _safe_int(new_val, 1))
+    else:
+        return True, []
+    # Split children: in-bounds ones keep their cell (and claim it),
+    # out-of-bounds ones need a new home inside the smaller grid.
+    overflow: list = []
+    occupied: set[tuple[int, int]] = set()
+    for child in node.children:
+        r = _safe_int(child.properties.get("grid_row", 0), 0)
+        c = _safe_int(child.properties.get("grid_column", 0), 0)
+        if r < rows and c < cols:
+            occupied.add((r, c))
+        else:
+            overflow.append(child)
+    if not overflow:
+        return True, []
+    free = [
+        (r, c)
+        for r in range(rows)
+        for c in range(cols)
+        if (r, c) not in occupied
+    ]
+    if len(free) < len(overflow):
+        return False, None
+    return True, [
+        (child, r, c) for child, (r, c) in zip(overflow, free)
+    ]

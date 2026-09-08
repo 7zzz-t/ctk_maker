@@ -156,3 +156,47 @@ class MultiChangePropertyCommand(Command):
         for name, (_before, after) in self.changes.items():
             project.update_property(self.widget_id, name, after)
         project.select_widget(self.widget_id)
+
+
+class MultiWidgetPropertyCommand(Command):
+    """Atomic property batch spanning several widgets — one undo step.
+
+    ``ChangePropertyCommand`` covers a single prop on one widget and
+    ``MultiChangePropertyCommand`` many props on ONE widget; neither
+    spans widgets. Grid-shrink auto-repair needs this: shrinking
+    ``grid_rows`` / ``grid_cols`` parks out-of-bounds children into
+    free cells of the smaller grid, so the container's dimension and
+    several children's cell coordinates must roll back / re-apply
+    together or Ctrl+Z would tear the shrink apart into N steps.
+
+    ``entries`` is a list of ``(widget_id, {prop: (before, after)})``.
+    Callers push AFTER applying the mutation (standard command
+    contract); ``undo`` / ``redo`` replay through
+    ``project.update_property`` so the same ``property_changed``
+    events fire as a manual edit. Selection follows the first entry
+    (the grid container) so undo/redo land where the user was.
+    """
+
+    def __init__(self, entries: list):
+        self.entries = [(wid, dict(changes)) for wid, changes in entries]
+        total = sum(len(changes) for _wid, changes in self.entries)
+        self.description = (
+            f"Change {total} properties across {len(self.entries)} widgets"
+        )
+
+    def _apply(self, project: "Project", take_after: bool) -> None:
+        for widget_id, changes in self.entries:
+            for name, (before, after) in changes.items():
+                project.update_property(
+                    widget_id, name, after if take_after else before,
+                )
+
+    def undo(self, project: "Project") -> None:
+        self._apply(project, False)
+        if self.entries:
+            project.select_widget(self.entries[0][0])
+
+    def redo(self, project: "Project") -> None:
+        self._apply(project, True)
+        if self.entries:
+            project.select_widget(self.entries[0][0])

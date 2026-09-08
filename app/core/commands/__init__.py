@@ -47,6 +47,7 @@ from app.core.commands.properties import (
     ChangeDescriptionCommand,
     ChangePropertyCommand,
     MultiChangePropertyCommand,
+    MultiWidgetPropertyCommand,
 )
 from app.core.commands.tree import (
     AddWidgetCommand,
@@ -90,6 +91,7 @@ __all__ = [
     "ChangePropertyCommand",
     "ChangeDescriptionCommand",
     "MultiChangePropertyCommand",
+    "MultiWidgetPropertyCommand",
     # handlers
     "AttachComponentCommand",
     "BindHandlerCommand",
