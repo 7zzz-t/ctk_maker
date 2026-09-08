@@ -231,3 +231,23 @@ def stock_stretch_snapshot(node) -> str | None:
     if mode not in (M_PERCENT, M_REMAIN):
         return None
     return "grow" if parent_main_px(node) is not None else None
+
+
+def sync_stock_snapshot(node) -> dict:
+    """Write the stock-field snapshot implied by the extra params and
+    return the ``{prop: (before, after)}`` changes applied (empty when
+    nothing moved). Called after an x. commit so the exported / saved
+    stock representation stays 00-compatible (percent/remain on a fixed
+    parent degrade to ``stretch: grow`` — stock's closest "take the
+    leftover" meaning; canvas rebalance and the runtime then behave
+    identically to stock grow distribution)."""
+    changes: dict = {}
+    if node is None:
+        return changes
+    snap = stock_stretch_snapshot(node)
+    if snap is not None:
+        current = node.properties.get("stretch")
+        if current != snap:
+            node.properties["stretch"] = snap
+            changes["stretch"] = (current, snap)
+    return changes

@@ -210,26 +210,41 @@ class ExtraParamCommand(Command):
     ``app/widgets/extra_params.py``). Undo/redo restore the whole
     ``node.extra`` dict snapshot so nested params (main_axis mode +
     percent) roll back together.
+
+    ``prop_changes`` optionally carries the stock-field snapshots the
+    param implied (spec §11: percent/remain → ``stretch: grow`` on a
+    fixed parent). They replay through ``project.update_property`` so
+    the usual ``property_changed`` refresh fires on undo/redo.
     """
 
     def __init__(
-        self, widget_id: str, before_extra: dict, after_extra: dict,
+        self,
+        widget_id: str,
+        before_extra: dict,
+        after_extra: dict,
+        prop_changes: dict | None = None,
     ):
         self.widget_id = widget_id
         self.before_extra = dict(before_extra)
         self.after_extra = dict(after_extra)
+        # {prop: (before, after)} — stock-field snapshot side-effects.
+        self.prop_changes = dict(prop_changes or {})
         self.description = "Change enhancement parameter"
 
-    def _apply(self, project: "Project", extra: dict) -> None:
+    def _apply(self, project: "Project", extra: dict, take_after: bool) -> None:
         node = project.get_widget(self.widget_id)
         if node is None:
             return
+        for name, (before, after) in self.prop_changes.items():
+            project.update_property(
+                self.widget_id, name, after if take_after else before,
+            )
         node.extra = dict(extra)
         project.event_bus.publish("widget_extra_changed", self.widget_id)
         project.select_widget(self.widget_id)
 
     def undo(self, project: "Project") -> None:
-        self._apply(project, self.before_extra)
+        self._apply(project, self.before_extra, False)
 
     def redo(self, project: "Project") -> None:
-        self._apply(project, self.after_extra)
+        self._apply(project, self.after_extra, True)

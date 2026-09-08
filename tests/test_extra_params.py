@@ -165,3 +165,36 @@ def test_stock_stretch_snapshot_rules():
     assert ep.stock_stretch_snapshot(sf_child) is None
     content_child = _widget("CTkButton", parent=parent)
     assert ep.stock_stretch_snapshot(content_child) is None
+
+
+def test_sync_stock_snapshot_writes_grow_and_reports_changes():
+    parent = _frame_parent("vbox", height=200)
+    child = _widget("CTkButton", parent=parent)
+    ep.param_set(child, "x.main_axis", ep.M_PERCENT)
+    changes = ep.sync_stock_snapshot(child)
+    assert changes == {"stretch": (None, "grow")}
+    assert child.properties["stretch"] == "grow"
+    # Idempotent — second sync reports no change.
+    assert ep.sync_stock_snapshot(child) == {}
+
+
+def test_sync_remain_on_fixed_parent_and_content_preserves_stretch():
+    parent = _frame_parent("vbox", height=200)
+    remain = _widget("CTkButton", parent=parent)
+    ep.param_set(remain, "x.main_axis", ep.M_REMAIN)
+    assert ep.sync_stock_snapshot(remain)["stretch"][1] == "grow"
+    # content mode never overrides a user-chosen stretch.
+    fixed = _widget("CTkButton", parent=parent, stretch="fixed")
+    ep.param_set(fixed, "x.main_axis", ep.M_CONTENT)
+    assert ep.sync_stock_snapshot(fixed) == {}
+    assert fixed.properties["stretch"] == "fixed"
+
+
+def test_sync_free_parent_leaves_stretch_untouched():
+    sf = WidgetNode("CTkScrollableFrame", properties={
+        "layout_type": "vbox", "height": 520,
+    })
+    child = _widget("CTkButton", parent=sf, stretch="fixed")
+    ep.param_set(child, "x.main_axis", ep.M_PERCENT)
+    assert ep.sync_stock_snapshot(child) == {}
+    assert child.properties["stretch"] == "fixed"

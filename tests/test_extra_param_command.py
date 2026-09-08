@@ -48,3 +48,22 @@ def test_extra_never_leaks_into_properties():
 def test_description():
     cmd = ExtraParamCommand("w", {}, {"height_mode": "auto"})
     assert "enhancement parameter" in cmd.description
+
+
+def test_prop_changes_replay_on_undo_and_redo():
+    project, frame = _project_with_frame()
+    after_extra = {"main_axis": {"mode": "percent", "percent": 40}}
+    cmd = ExtraParamCommand(
+        frame.id,
+        {},
+        after_extra,
+        prop_changes={"stretch": ("fixed", "grow")},
+    )
+    cmd.redo(project)
+    node = project.get_widget(frame.id)
+    assert node.extra == after_extra
+    assert node.properties["stretch"] == "grow"
+    cmd.undo(project)
+    node = project.get_widget(frame.id)
+    assert node.extra == {}
+    assert node.properties["stretch"] == "fixed"

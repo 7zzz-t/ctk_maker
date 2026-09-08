@@ -854,11 +854,20 @@ class CommitMixin:
     def _commit_extra_param(self, pname: str, value) -> None:
         """Commit an x.-prefixed enhancement param: write it onto
         ``WidgetNode.extra`` and record one undo step. Never touches
-        ``properties`` (stock 00 forwards those to the CTk ctor)."""
+        ``properties`` directly as user intent — but stock-field
+        SNAPSHOTS implied by the param (spec §11: percent/remain →
+        stretch:grow on a fixed parent) are synced so the exported /
+        saved representation stays 00-compatible and the canvas
+        re-layouts immediately."""
         if self.current_id is None:
             return
-        from app.widgets.extra_params import extra_key, param_set
-        if extra_key(pname) is None:
+        from app.widgets.extra_params import (
+            extra_key,
+            param_set,
+            sync_stock_snapshot,
+        )
+        key = extra_key(pname)
+        if key is None:
             return
         node = self.project.get_widget(self.current_id)
         if node is None:
@@ -867,11 +876,22 @@ class CommitMixin:
         if not param_set(node, pname, value):
             return
         after = dict(node.extra or {})
+        prop_changes: dict = {}
+        if key == "main_axis" or key.startswith("main_axis."):
+            prop_changes = sync_stock_snapshot(node)
+            for name, (_before, snap_value) in prop_changes.items():
+                if snap_value is not None:
+                    self.project.event_bus.publish(
+                        "property_changed", self.current_id, name,
+                        snap_value,
+                    )
         self._refresh_extra_row(pname)
         if getattr(self, "_suspend_history", False):
             return
         self.project.history.push(
-            ExtraParamCommand(self.current_id, before, after),
+            ExtraParamCommand(
+                self.current_id, before, after, prop_changes,
+            ),
         )
 
     def _popup_extra_enum_menu_at(
