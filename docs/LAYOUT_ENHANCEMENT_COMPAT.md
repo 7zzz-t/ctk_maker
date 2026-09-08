@@ -61,7 +61,7 @@
 | stretch="fixed" | `stretch="fixed"` | 直落 |
 | stretch="fill" | `stretch="fill"` | 直落 |
 | stretch="grow" | `stretch="grow"` | 直落 |
-| 主轴 40% / 剩余 ×N | 私有键（见下）+ 最近似 00 参数（`grow`/`fill`） | 降级快照 |
+| 主轴 40% / 剩余 ×N | 私有键（见下）+ **磁盘烘焙**：`fill` + 精确主轴 px（见 §11.8，替代早期 grow 近似） | 烘焙快照 |
 | grid 子 "贴边/铺满" | `grid_sticky` 原值（00 原生） | 直落 |
 | auto-height（height=0） | 见"存量盘点"待办，需确认 00 对 height=0 的读取/面板行为 | 待专项核实 |
 
@@ -249,12 +249,18 @@
 
 ### 11.8 percent / remain 最终语义（一页速查）
 
+**快照 = 磁盘烘焙（decision 延续 §11.5）**：保存时 percent/remain 在定高父上
+被算成 00 的确定参数 —— `stretch="fill"` + 精确主轴 px（percent =
+`round(父px×pct%)`；remain 与 grow/remain 同池均分剩余）。内存与导出仍走响应式
+（02 画布按 px/grow 重算、导出 remain=expand grow）；00 打开看到的是烘焙后的
+静态、逐像素一致布局（remain 在 00 里不随窗口再伸缩）。
+
 | 场景 | percent | remain |
 |---|---|---|
-| 定高父（CTkFrame vbox/hbox） | 画布与导出按 `round(父px×pct%)` 固定；快照 `stretch=grow` | 进 grow 池均分剩余；快照 `stretch=grow` |
-| 自由轴父（scroll 内容 / auto） | 降级 content（保持自身尺寸） | 降级 content（随 grow/fixed 快照行为） |
-| 00 打开文件 | 看到固定高 + stretch=grow（近似，非精确 40%） | 与 grow 一致 |
-| 00 编辑另存 | 顶层 extra 被丢弃 → 降级为快照值（预期） | 同左 |
+| 定高父（CTkFrame vbox/hbox） | 画布/导出按 px 固定；**磁盘烘焙 stretch=fill + px** | 内存/画布 grow 池均分；**磁盘烘焙 fill + 均分后 px** |
+| 自由轴父（scroll 内容 / auto） | 不烘焙（磁盘保留自身 stretch/尺寸）；02 侧降级 content | 同左 |
+| 00 打开文件 | 静态 fill + 精确 px（与 02 画布逐像素一致） | 同左（非响应式） |
+| 00 编辑另存 | 顶层 extra 被丢弃 → 节点降级为烘焙后的固定形态（预期） | 同左 |
 
 ---
 
