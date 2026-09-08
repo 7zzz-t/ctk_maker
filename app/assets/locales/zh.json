@@ -998,6 +998,7 @@
   "prop.bind_to_variable": "绑定到变量",
   "prop.open_variables_window": "打开变量窗口…",
   "prop.bind_non_boolean_int": "绑定到非布尔整数？",
+  "prop.batch_selected": "{count} 个控件已选",
   "prop.edit": "编辑",
   "prop.description_title": "描述：{label}",
   "prop.delete": "删除",

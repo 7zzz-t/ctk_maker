@@ -93,6 +93,12 @@ class PropertiesPanel(CommitMixin, SchemaMixin, ctk.CTkFrame):
         super().__init__(master, fg_color=PANEL_BG)
         self.project = project
         self.current_id: str | None = None
+        # Multi-select batch edit: when the object tree / canvas holds
+        # 2+ selected widgets of the SAME widget_type, the panel keeps
+        # rendering the primary selection (``current_id``) but every
+        # commit applies to the whole list below as one undo step.
+        # ``None`` = single-selection mode.
+        self._batch_ids: list[str] | None = None
         # Called with no args, returns the current workspace tool
         # name ("edit" / "select" / "hand"). When set to something
         # other than "edit", `_rebuild` skips the full schema build
@@ -708,6 +714,30 @@ class PropertiesPanel(CommitMixin, SchemaMixin, ctk.CTkFrame):
         self._rebuild()
 
     def _on_selection(self, widget_id: str | None) -> None:
+        # Multi-select: ``set_multi_selection`` broadcasts ``None`` for
+        # 2+ rows (clearing the panel), but when every selected widget
+        # shares one widget_type we keep the panel open in batch mode —
+        # primary drives the rendering, commits fan out to the set.
+        batch_ids: list[str] | None = None
+        if widget_id is None:
+            selected = sorted(self.project.selected_ids or ())
+            primary_id = self.project.selected_id
+            primary = (
+                self.project.get_widget(primary_id)
+                if primary_id is not None else None
+            )
+            if len(selected) >= 2 and primary is not None:
+                same_type = [
+                    i for i in selected
+                    if (
+                        (n := self.project.get_widget(i)) is not None
+                        and n.widget_type == primary.widget_type
+                    )
+                ]
+                if len(same_type) >= 2:
+                    batch_ids = same_type
+                    widget_id = primary_id
+        self._batch_ids = batch_ids
         # Discard pending event rows when the user moves to a
         # different widget — incomplete placeholders are scoped to
         # the editing session for the widget that spawned them.
@@ -999,17 +1029,26 @@ class PropertiesPanel(CommitMixin, SchemaMixin, ctk.CTkFrame):
                 pass
 
     def _update_chrome(self, node, descriptor) -> None:
-        self._type_label.configure(text=descriptor.type_name)
-        # For the Window node we show the active document's UUID
-        # instead of the sentinel WINDOW_ID — otherwise every window
-        # reads as the same "__window_" prefix in the header.
-        if node.id == WINDOW_ID:
-            id_text = self.project.active_document.id[:8]
+        batch_count = len(self._batch_ids) if self._batch_ids else 0
+        if batch_count:
+            # Batch multi-select header — "N × CTkButton". Name stays
+            # read-only (rename is a per-widget operation).
+            self._type_label.configure(
+                text=f"{batch_count} × {descriptor.type_name}",
+            )
+            self._id_label.configure(text="")
         else:
-            id_text = node.id[:8]
-        self._id_label.configure(
-            text=tr("prop.id", "ID: {id}").format(id=id_text),
-        )
+            self._type_label.configure(text=descriptor.type_name)
+            # For the Window node we show the active document's UUID
+            # instead of the sentinel WINDOW_ID — otherwise every window
+            # reads as the same "__window_" prefix in the header.
+            if node.id == WINDOW_ID:
+                id_text = self.project.active_document.id[:8]
+            else:
+                id_text = node.id[:8]
+            self._id_label.configure(
+                text=tr("prop.id", "ID: {id}").format(id=id_text),
+            )
 
         # Widget-type icon (mirrors palette's icon name convention).
         icon_name = icon_for_type(descriptor.type_name)
@@ -1023,12 +1062,24 @@ class PropertiesPanel(CommitMixin, SchemaMixin, ctk.CTkFrame):
         self._suspend_name_trace = True
         try:
             if self._name_var is not None:
-                self._name_var.set(node.name or descriptor.display_name)
+                if batch_count:
+                    self._name_var.set(
+                        tr(
+                            "prop.batch_selected",
+                            "{count} widgets selected",
+                        ).format(count=batch_count),
+                    )
+                else:
+                    self._name_var.set(node.name or descriptor.display_name)
         finally:
             self._suspend_name_trace = False
-        self._name_entry.configure(state="normal")
-        self._update_description_preview(node)
-        self._sync_edit_button(node)
+        self._name_entry.configure(
+            state="disabled" if batch_count else "normal",
+        )
+        self._update_description_preview(
+            None if batch_count else node,
+        )
+        self._sync_edit_button(None if batch_count else node)
 
     def _sync_edit_button(self, node) -> None:
         """Show the Edit shortcut only when it makes sense: we're in

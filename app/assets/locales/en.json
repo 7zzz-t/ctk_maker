@@ -1012,6 +1012,7 @@
   "props.panel.desc": "Desc",
   "prop.property": "Property",
   "prop.value": "Value",
+  "prop.batch_selected": "{count} widgets selected",
   "prop.id": "ID: {id}",
   "prop.delete_action": "Delete action…",
   "prop.script_not_set": "Script not set",

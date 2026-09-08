@@ -39,6 +39,7 @@ from app.ui.icons import load_tk_icon
 from app.widgets.layout_schema import (
     LAYOUT_DISPLAY_NAMES,
     LAYOUT_ICON_NAMES,
+    managed_geometry_disabled,
     plan_grid_shrink_relocation,
 )
 from tools.text_editor_dialog import TextEditorDialog
@@ -52,6 +53,68 @@ from .constants import (
 from .editors import get_editor
 from .format_utils import coerce_value, enum_options_for, prop_row_label
 from .overlays import SLOT_TEXT_VALUE
+
+
+def apply_batch_prop_entries(
+    project,
+    node_ids,
+    widget_type: str | None,
+    pname: str,
+    value,
+    *,
+    clamp=None,
+    grid_guard=None,
+) -> list:
+    """Apply one property edit to every target widget, returning the
+    ``[(widget_id, {prop: (before, after)})]`` entries for a single
+    ``MultiWidgetPropertyCommand`` undo step.
+
+    Multi-select batch edit — the Properties panel keeps rendering the
+    primary selection while every same-type widget in ``node_ids`` gets
+    the change:
+
+    - widgets of another ``widget_type`` (when given) are skipped;
+    - widgets whose parent's layout manager owns the field
+      (``managed_geometry_disabled``) are skipped — those rows are
+      frozen per-node even if the primary's row looked editable;
+    - ``clamp(node, pname, value)`` (when given) bounds the value per
+      container, e.g. the workspace's container-bounds clamp;
+    - ``grid_guard(node, pname, value)`` (when given) returns False for
+      widgets the caller decided to leave out — used for the
+      grid_rows/grid_cols shrink check, where an orphaned child cannot
+      be silently dropped. No auto-repair here: each container either
+      shrinks cleanly or is skipped.
+
+    Applies the change through ``project.update_property`` (so the
+    usual ``property_changed`` refresh + ``compute_derived`` side
+    effects fire) and snapshots before/after per widget; a widget whose
+    properties didn't actually change contributes no entry.
+    """
+    entries: list[tuple] = []
+    for widget_id in node_ids:
+        node = project.get_widget(widget_id)
+        if node is None:
+            continue
+        if widget_type is not None and node.widget_type != widget_type:
+            continue
+        if pname in managed_geometry_disabled(node):
+            continue
+        new_value = clamp(node, pname, value) if clamp is not None else value
+        if grid_guard is not None and not grid_guard(
+            node, pname, new_value,
+        ):
+            continue
+        before = dict(node.properties)
+        project.update_property(widget_id, pname, new_value)
+        after = dict(node.properties)
+        changed = {
+            k: (before.get(k), after.get(k))
+            for k in set(before) | set(after)
+            if before.get(k) != after.get(k)
+        }
+        if changed:
+            entries.append((widget_id, changed))
+    return entries
 
 
 class CommitMixin:
@@ -710,6 +773,14 @@ class CommitMixin:
         node = self.project.get_widget(self.current_id)
         if node is None:
             return
+        # Multi-select batch mode: the panel renders the primary
+        # selection, and every edit applies to the whole same-type set
+        # (_batch_ids) as ONE undo step. Nested containers / layout
+        # structure keys are still allowed — each widget updates
+        # independently through its own guard (see _commit_prop_batch).
+        if getattr(self, "_batch_ids", None):
+            self._commit_prop_batch(pname, value)
+            return
         # Grid shrink guard — block grid_rows/grid_cols going below the
         # max row/column index actually occupied by a child, otherwise
         # children silently disappear from the canvas (still in the
@@ -773,6 +844,55 @@ class CommitMixin:
         self.project.history.push(
             MultiChangePropertyCommand(self.current_id, changed),
         )
+
+    def _commit_prop_batch(self, pname: str, value) -> None:
+        """Multi-select commit: apply ``pname=value`` to every widget
+        in ``_batch_ids`` (same widget_type as the primary) and push a
+        single ``MultiWidgetPropertyCommand`` so one Ctrl+Z reverts the
+        whole batch.
+
+        Per-widget skips are silent and safe:
+        - fields the widget's parent layout owns
+          (``managed_geometry_disabled``) are never written;
+        - grid_rows/grid_cols shrink is guard-checked per container
+          (``_validate_grid_shrink``) — a container that would orphan a
+          child is left untouched (no auto-repair across a batch);
+        - geometry values pass through the container-bounds clamp.
+        """
+        primary = self.project.get_widget(self.current_id)
+        if primary is None:
+            return
+        batch_ids = list(getattr(self, "_batch_ids", None) or ())
+        if not batch_ids:
+            return
+        entries = apply_batch_prop_entries(
+            self.project,
+            batch_ids,
+            primary.widget_type,
+            pname,
+            value,
+            clamp=self._clamp_to_container_bounds,
+            grid_guard=self._batch_grid_shrink_guard,
+        )
+        if not entries:
+            return
+        if getattr(self, "_suspend_history", False):
+            return
+        self.project.history.push(MultiWidgetPropertyCommand(entries))
+
+    def _batch_grid_shrink_guard(self, node, pname: str, value) -> bool:
+        """Grid-shrink check used per widget during a batch commit.
+        Unlike the single-selection path, a blocked container is simply
+        skipped — we never auto-relocate children mid-batch and never
+        pop an error for one widget of many.
+        """
+        if pname not in ("grid_rows", "grid_cols"):
+            return True
+        try:
+            ok, _msg = self._validate_grid_shrink(node, pname, value)
+        except (TypeError, ValueError):
+            return True
+        return ok
 
     # ------------------------------------------------------------------
     # Advisory dialog — disabled-icon tint requires runtime helper
