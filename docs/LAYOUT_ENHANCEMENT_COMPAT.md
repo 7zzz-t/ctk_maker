@@ -234,16 +234,18 @@
 
 1. `WidgetNode.extra` + `_ctkmaker_meta` 序列化与迁移 —— **完成**
    （`65410bd`，含 extra 顶层存储与递归还原）；
-2. 面板 extra 行注入/编辑（含多选批量）—— **行注入与编辑完成**
-   （`81e3ef1` enum 行 + `8cec00f` percent 数值行）；多选 x. 批量未做（v2）；
+2. 面板 extra 行注入/编辑（含多选批量）—— **完成**
+   （`81e3ef1` enum 行 + `8cec00f` percent 数值行 + `e818ce1` 批量扇出/
+   `MultiExtraParamCommand` + `5b0773c` 选项汉化 + `3e33205` 并入 Layout 组 +
+   `8e6af5c` auto 态钉 H 退出 auto 的联动）；禁用/灰显细节列 v2 打磨；
 3. auto-height 重构为 `height_mode` —— **完成**
    （`5bc5aaf`：画布/导出读 `is_auto_height`；extra-auto 导出省略 height；
    `3c322c6` rebalance 跳过 auto 父）；
 4. `main_axis` percent/remain 计算与导出静态化 —— **完成**
    （`5a93805` 快照同步 stretch:grow；`3c322c6` 画布 percent 固定预算；
    `f79c1cd` 导出精确 px）；
-5. 兼容回归 + 全量测试 + 文档收口 —— 进行中（本节收口；
-   00 人工回归见 §9.2 的记录方法）。
+5. 兼容回归 + 全量测试 + 文档收口 —— 代码侧完成（§8 阻塞标注、§9.4 缺陷记录、
+   本节收口）；**00 人工回归**（auto/percent 文件在 00 的观感，避 §9.4 结构）待做。
 
 ### 11.8 percent / remain 最终语义（一页速查）
 
@@ -265,3 +267,6 @@
 - 2026-09-08：§11 实施完成 —— extra 存储、面板行（enum+percent 数值）、auto-height
   first-class（画布/导出/快照）、percent/remain 画布预算与导出精确 px（提交链
   `65410bd → 81e3ef1 → 5bc5aaf → 5a93805 → 3c322c6 → f79c1cd → 8cec00f`）。
+- 2026-09-09：收口补链 —— 批量 x.（`e818ce1`）、§8 core 阻塞标注与选项汉化
+  （`5b0773c`）、extra 行并入 Layout 组（`3e33205`）、auto 态钉 H 退出 auto（`8e6af5c`）；
+  §9.4 记录 00 的 place+composite 缺陷（`4ea7c16`）。
