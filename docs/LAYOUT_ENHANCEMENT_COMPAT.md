@@ -116,17 +116,33 @@
 
 ---
 
-## 九、存量盘点待办（本次设计完工后执行）
+## 九、存量盘点记录（本次设计完工后执行）
 
 > 用户提示：**我们此前相对 00 的修改，可能已引入 00 未知的键或值**。
-> 本规范定稿后，做一次系统盘点并出修复清单：
+> 盘点已启动，结论逐步回填本节。
 
-- [ ] diff 00 vs 02 的 descriptor `default_properties` 键集合 → 02 新增键；
-- [ ] diff 00 vs 02 的 `layout_schema` / `LAYOUT_DEFAULTS` / 行 schema 键集合；
-- [ ] 逐项核对写入路径（drop / paste / commit / auto-assign / backfill）是否会
-      产出 00 未知键或未知值（重点：`height=0` auto 语义、受管 x/y 删除的
-      反向面、grid auto-grow 期间临时键是否泄漏落盘）；
-- [ ] 对发现的每一项：判定归属（②映射 / ③私有键 / 泄漏须修），更新本规范附表。
+### 9.1 键层盘点（已完成，结论：干净）
+
+- 方法：分别收集 00 / 02 全部 descriptor 的 `default_properties` 键 +
+  `property_schema` 行名 + 布局全局键（`LAYOUT_DEFAULTS` /
+  `LAYOUT_CONTAINER_DEFAULTS`），做集合差。
+- **结论：零新增、零删除**。02 写进 .ctkproj 的键全部落在 00 白名单内。
+
+### 9.2 值层盘点（进行中）
+
+| 候选值 | 判定 | 说明 |
+|---|---|---|
+| `CTkFrame height=0`（auto 语义，e231ab8 放行） | **低风险 / 保留** | 00 能加载（int、schema 键内）；00 与 02 导出行为**实测一致**——都省略 `height` 参数（00 侧语义退化为"默认高"，非破坏）；00 画布会把父画成 0 高（子 place 不受裁剪仍可见），仅视觉差异。文件保持 `height=0`，02 重开恢复 auto 语义。 |
+| 受管 vbox/grid 子 x/y 缺失（cc19a26 删除） | 无风险 | 00 对 pack/grid 子不读 x/y；缺省即默认，渲染由父布局决定。 |
+| grid 容器 `grid_rows/cols` 增长值 | 无风险 | 00 原生键、int、同 schema（min1 max50 两边一致）。 |
+| `stretch` / `grid_sticky` 等 | 无风险 | 00 原生三值/组合，两版同源。 |
+| `_pending_parent_dim_changes` | 无风险 | 仅内存临时 attr，从不落盘。 |
+
+### 9.3 后续待办
+
+- [ ] 值层：完成画布侧复核（00 渲染 height=0 的实际像素表现，人工预览确认）；
+- [ ] 若未来实现容器默认拉伸/百分比：所有新表达遵循第五、六节映射与私有键约定；
+- [ ] 导出无残留收尾（第八节清单）。
 
 ---
 
