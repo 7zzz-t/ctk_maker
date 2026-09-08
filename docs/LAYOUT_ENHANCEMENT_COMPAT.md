@@ -147,6 +147,28 @@
 - [ ] 导出无残留收尾（第八节清单）；
 - [x] 新参数类别机制设计 → 见第十一节（决策 `dec-aa6eedbd648307d7` 一步到位全做）。
 
+### 9.4 已知原版缺陷（00 自身，非 02 引入；决策 `dec-2e1566ae90a10710`：接受并记录）
+
+**现象**：工程若含「父容器 `layout_type=place` + 子控件为多部件（composite，
+`anchor_widget is not widget`，如 CTkScrollableFrame / CTkTabview）」结构，
+**原版 00 打开即崩**：
+
+```
+00 widget_lifecycle._place_nested → anchor_widget.place(width=…, height=…)
+→ ValueError: 'width'/'height' must go to the constructor, not the place method
+（ctkmaker-core 5.5.x place() 拒绝 width/height）
+```
+
+**性质**：
+- 00 的 `_place_nested` 对 composite 唯一地调用 `place(width,height)`；该组合无论
+  由 00 还是 02 生成，官方 00 都崩（00 自己甚至无法现场创建该结构——放置即崩）；
+- 02 已修复同一缺陷（`ac2177e`：先 `configure(w/h)` 再 `place(x,y)`），02 打开正常；
+- 与增强参数、`_ctkmaker_meta`、percent 等**无任何因果**——换 sidecar 存参数同样崩。
+
+**处置**：接受为 00 原版缺陷并记录，不补丁 00、不改工程结构。含该结构的工程请用
+02 打开/编辑；跨 00 使用前需把 composite 父改为 vbox/grid（受管布局走 pack/grid，
+00 不会 `place(w/h)`）。实测样例：`MainPage` 工程含 9 处该结构。
+
 ---
 
 ## 十一、增强参数机制（新参数类别，v1 设计定稿）
