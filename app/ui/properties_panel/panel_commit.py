@@ -788,6 +788,41 @@ class CommitMixin:
         if getattr(self, "_batch_ids", None):
             self._commit_prop_batch(pname, value)
             return
+        # First-class auto-height (spec §11): typing a concrete H on an
+        # auto container means "leave auto, pin this height". One undo
+        # step restores both the extra marker and the previous height.
+        if (
+            pname == "height"
+            and node.widget_type == "CTkFrame"
+            and (node.extra or {}).get("height_mode") == "auto"
+        ):
+            current_h = node.properties.get("height")
+            try:
+                numeric = int(value)
+            except (TypeError, ValueError):
+                numeric = current_h
+            if numeric == current_h:
+                return
+            value = self._clamp_to_container_bounds(node, pname, numeric)
+            before_extra = dict(node.extra or {})
+            extra2 = dict(before_extra)
+            extra2.pop("height_mode", None)
+            node.extra = extra2
+            node.properties["height"] = value
+            self.project.event_bus.publish(
+                "property_changed", self.current_id, pname, value,
+            )
+            self._refresh_extra_row("x.height_mode")
+            if not getattr(self, "_suspend_history", False):
+                self.project.history.push(
+                    ExtraParamCommand(
+                        self.current_id,
+                        before_extra,
+                        dict(node.extra or {}),
+                        {pname: (current_h, value)},
+                    ),
+                )
+            return
         # Grid shrink guard — block grid_rows/grid_cols going below the
         # max row/column index actually occupied by a child, otherwise
         # children silently disappear from the canvas (still in the
