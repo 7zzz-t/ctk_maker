@@ -109,13 +109,22 @@
 
 ---
 
-## 八、导出无残留约束（待收尾清单）
+## 八、导出无残留约束（状态：上游依赖阻塞）
+
+> **2026-09-09 阻塞确认**：`_ctkmaker_min / _ctkmaker_fixed / _ctkmaker_image`
+> 是运行时 **ctkmaker-core `ctk.balance_pack` 的执行契约**（跳过固定子、内容下限、
+> image resize）。02 仓库只有 exporter——删掉属性行后 core 拿不到 min/fixed，
+> flex 收缩立即退化（文本被压扁）。core 理论可改自测（`pack_info().expand` 判
+> grow、`winfo_reqheight` 作内容下限、`getattr(c, "_image")` 判 image），但属于
+> **ctkmaker-core 上游（含本机 site-packages 5.5.1）** 改动，02 单方面无法交付。
 
 - [ ] 移除逐子 `_ctkmaker_min = N` / `_ctkmaker_fixed = True` 属性行
-      （`app/io/code_exporter/__init__.py` flex-shrink 发射段）；
+      （`app/io/code_exporter/__init__.py` flex-shrink 发射段）—— **依赖 core 改造**；
 - [ ] 容器 `<Configure> → ctk.balance_pack` 的绑定收敛为"需要才一行框架调用"，
       或由框架内部自行绑定（CTkScrollableFrame 已确认不绑定）；
 - [ ] 复核 auto-height / 其它 helper 相关行，保持零 `_ctkmaker_*` 文本残留。
+- [ ] （未定）若决定清理：需在 ctkmaker-core 建"自测式 balance_pack"分支并同步
+      本机 site-packages 验证，再回改 exporter 去属性。
 
 ---
 

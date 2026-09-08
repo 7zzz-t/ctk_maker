@@ -1020,8 +1020,9 @@ class CommitMixin:
         menu = tk.Menu(self, tearoff=0, **menu_style())
         for opt in options:
             prefix = "• " if opt == current else "   "
+            label_text = tr(f"props.extra.{opt}", labels.get(opt, opt))
             menu.add_command(
-                label=f"{prefix}{labels.get(opt, opt)}",
+                label=f"{prefix}{label_text}",
                 command=lambda v=opt, p=pname: self._commit_prop(p, v),
             )
         try:

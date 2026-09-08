@@ -255,7 +255,7 @@ class SchemaMixin:
         if prop.get("type") == "number":
             return f"{value}%"
         labels = prop.get("extra_display") or {}
-        return str(labels.get(value, value))
+        return tr(f"props.extra.{value}", str(labels.get(value, value)))
 
     def _refresh_extra_row(self, pname: str) -> None:
         """Repaint one enhancement-param row after an x. commit / undo."""
