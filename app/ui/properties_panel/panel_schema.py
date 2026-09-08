@@ -179,14 +179,20 @@ class SchemaMixin:
         rows = self._extra_rows_visible(node)
         if not rows:
             return
-        gid = "g:x_extra"
-        self.tree.insert(
-            "", "end", iid=gid,
-            text=prop_group_label(
-                tr("props.group.layout_extras", "Layout Extras"),
-            ),
-            values=("",), open=True, tags=("class",),
-        )
+        # Prefer attaching under the existing Layout group (tail, right
+        # after the stock layout rows); fall back to a dedicated group
+        # when the widget has no Layout group at all.
+        if self.tree.exists("g:Layout"):
+            gid = "g:Layout"
+        else:
+            gid = "g:x_extra"
+            self.tree.insert(
+                "", "end", iid=gid,
+                text=prop_group_label(
+                    tr("props.group.layout_extras", "Layout Extras"),
+                ),
+                values=("",), open=True, tags=("class",),
+            )
         for prop in rows:
             pname = prop["name"]
             iid = f"p:{pname}"
