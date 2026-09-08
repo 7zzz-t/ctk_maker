@@ -200,3 +200,36 @@ class MultiWidgetPropertyCommand(Command):
         self._apply(project, True)
         if self.entries:
             project.select_widget(self.entries[0][0])
+
+
+class ExtraParamCommand(Command):
+    """One undo step for a first-class 02 enhancement param
+    (``WidgetNode.extra``, UI row names prefixed ``x.``). ``extra`` is
+    NOT a ``properties`` key — stock 00 forwards properties to the CTk
+    constructor, so these params can never ride that dict (see
+    ``app/widgets/extra_params.py``). Undo/redo restore the whole
+    ``node.extra`` dict snapshot so nested params (main_axis mode +
+    percent) roll back together.
+    """
+
+    def __init__(
+        self, widget_id: str, before_extra: dict, after_extra: dict,
+    ):
+        self.widget_id = widget_id
+        self.before_extra = dict(before_extra)
+        self.after_extra = dict(after_extra)
+        self.description = "Change enhancement parameter"
+
+    def _apply(self, project: "Project", extra: dict) -> None:
+        node = project.get_widget(self.widget_id)
+        if node is None:
+            return
+        node.extra = dict(extra)
+        project.event_bus.publish("widget_extra_changed", self.widget_id)
+        project.select_widget(self.widget_id)
+
+    def undo(self, project: "Project") -> None:
+        self._apply(project, self.before_extra)
+
+    def redo(self, project: "Project") -> None:
+        self._apply(project, self.after_extra)

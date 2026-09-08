@@ -46,6 +46,7 @@ from app.core.commands.handlers import (
 from app.core.commands.properties import (
     ChangeDescriptionCommand,
     ChangePropertyCommand,
+    ExtraParamCommand,
     MultiChangePropertyCommand,
     MultiWidgetPropertyCommand,
 )
@@ -92,6 +93,7 @@ __all__ = [
     "ChangeDescriptionCommand",
     "MultiChangePropertyCommand",
     "MultiWidgetPropertyCommand",
+    "ExtraParamCommand",
     # handlers
     "AttachComponentCommand",
     "BindHandlerCommand",

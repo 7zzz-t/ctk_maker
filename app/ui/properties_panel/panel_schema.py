@@ -153,6 +153,86 @@ class SchemaMixin:
     # ------------------------------------------------------------------
     # Schema traversal → tree hierarchy
     # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # 02-only enhancement params (spec §11) — first-class rows backed by
+    # WidgetNode.extra, NEVER by properties (stock 00 forwards every
+    # property key to the CTk constructor). Stock 00 UI never renders
+    # these rows; edits commit through the x.-prefixed route.
+    # ------------------------------------------------------------------
+    def _extra_rows_visible(self, node) -> list:
+        from app.widgets.extra_params import extra_rows_for
+        return [
+            r for r in extra_rows_for(node) if r.get("type") != "number"
+        ]
+
+    def _populate_extra_rows(self, node) -> None:
+        rows = self._extra_rows_visible(node)
+        if not rows:
+            return
+        gid = "g:x_extra"
+        self.tree.insert(
+            "", "end", iid=gid,
+            text=prop_group_label(
+                tr("props.group.layout_extras", "Layout Extras"),
+            ),
+            values=("",), open=True, tags=("class",),
+        )
+        for prop in rows:
+            pname = prop["name"]
+            iid = f"p:{pname}"
+            self._prop_iids[pname] = iid
+            label = prop_row_label(
+                prop.get("row_label") or prop.get("label") or pname,
+            )
+            display = self._extra_row_display(prop, pname, node)
+            self.tree.insert(
+                gid, "end", iid=iid, text=label,
+                values=(display,), open=False, tags=("normal",),
+            )
+            if self.overlays is None:
+                continue
+            btn = tk.Label(
+                self.tree, text="▾", bg=TREE_BG, fg="#aaaaaa",
+                font=ui_font(12, "bold"), cursor="hand2", borderwidth=0,
+            )
+            btn.bind(
+                "<Button-1>",
+                lambda _e, p=pname, b=btn: self._popup_extra_enum_menu_at(
+                    p, b.winfo_rootx(),
+                    b.winfo_rooty() + b.winfo_height(),
+                ),
+            )
+            self.overlays.add(iid, SLOT_ENUM_BUTTON, btn, place_enum_button)
+
+    def _extra_row_display(self, prop: dict, pname: str, node) -> str:
+        from app.widgets.extra_params import param_get
+        value = param_get(node, pname)
+        if value is None:
+            return ""
+        labels = prop.get("extra_display") or {}
+        return str(labels.get(value, value))
+
+    def _refresh_extra_row(self, pname: str) -> None:
+        """Repaint one enhancement-param row after an x. commit / undo."""
+        iid = self._prop_iids.get(pname)
+        if iid is None:
+            return
+        node = self.project.get_widget(self.current_id)
+        if node is None:
+            return
+        prop = next(
+            (r for r in self._extra_rows_visible(node) if r["name"] == pname),
+            None,
+        )
+        if prop is None:
+            return
+        try:
+            self.tree.set(
+                iid, "value", self._extra_row_display(prop, pname, node),
+            )
+        except tk.TclError:
+            pass
+
     def _populate_schema(self, descriptor, properties: dict, node=None) -> None:
         schema = [
             p for p in self._effective_schema(descriptor)
@@ -236,6 +316,11 @@ class SchemaMixin:
             # them as a distinct zone.
             self._insert_section_spacer()
             self._populate_local_variables_group()
+
+        # 02-only enhancement params (spec §11) — first-class rows backed
+        # by WidgetNode.extra (stock 00 UI never shows these).
+        if node is not None:
+            self._populate_extra_rows(node)
 
         # CTkScript model — the "Scripts" group (attach CTkScript
         # classes to this object). Sits above Events: you attach a

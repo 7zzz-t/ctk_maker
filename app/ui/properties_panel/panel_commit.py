@@ -27,6 +27,7 @@ from app.ui.tint_color_picker import ColorPickerDialog
 from app.core.commands import (
     ChangePropertyCommand,
     ChangeVariableDefaultCommand,
+    ExtraParamCommand,
     MultiChangePropertyCommand,
     MultiWidgetPropertyCommand,
 )
@@ -773,6 +774,11 @@ class CommitMixin:
         node = self.project.get_widget(self.current_id)
         if node is None:
             return
+        # First-class 02 enhancement params (spec §11): x.-prefixed rows
+        # backed by WidgetNode.extra — never a real properties key.
+        if str(pname).startswith("x."):
+            self._commit_extra_param(pname, value)
+            return
         # Multi-select batch mode: the panel renders the primary
         # selection, and every edit applies to the whole same-type set
         # (_batch_ids) as ONE undo step. Nested containers / layout
@@ -844,6 +850,64 @@ class CommitMixin:
         self.project.history.push(
             MultiChangePropertyCommand(self.current_id, changed),
         )
+
+    def _commit_extra_param(self, pname: str, value) -> None:
+        """Commit an x.-prefixed enhancement param: write it onto
+        ``WidgetNode.extra`` and record one undo step. Never touches
+        ``properties`` (stock 00 forwards those to the CTk ctor)."""
+        if self.current_id is None:
+            return
+        from app.widgets.extra_params import extra_key, param_set
+        if extra_key(pname) is None:
+            return
+        node = self.project.get_widget(self.current_id)
+        if node is None:
+            return
+        before = dict(node.extra or {})
+        if not param_set(node, pname, value):
+            return
+        after = dict(node.extra or {})
+        self._refresh_extra_row(pname)
+        if getattr(self, "_suspend_history", False):
+            return
+        self.project.history.push(
+            ExtraParamCommand(self.current_id, before, after),
+        )
+
+    def _popup_extra_enum_menu_at(
+        self, pname: str, x_root: int, y_root: int,
+    ) -> None:
+        """Dropdown for an x.-prefixed enum row — options come from the
+        param's row definition (``extra_options``), current value from
+        ``WidgetNode.extra``."""
+        node = self.project.get_widget(self.current_id)
+        if node is None:
+            return
+        from app.widgets.extra_params import (
+            extra_rows_for,
+            param_get,
+        )
+        prop = next(
+            (r for r in extra_rows_for(node) if r["name"] == pname), None,
+        )
+        if prop is None:
+            return
+        options = prop.get("extra_options") or ()
+        if not options:
+            return
+        labels = prop.get("extra_display") or {}
+        current = param_get(node, pname)
+        menu = tk.Menu(self, tearoff=0, **menu_style())
+        for opt in options:
+            prefix = "• " if opt == current else "   "
+            menu.add_command(
+                label=f"{prefix}{labels.get(opt, opt)}",
+                command=lambda v=opt, p=pname: self._commit_prop(p, v),
+            )
+        try:
+            menu.tk_popup(x_root, y_root)
+        finally:
+            menu.grab_release()
 
     def _commit_prop_batch(self, pname: str, value) -> None:
         """Multi-select commit: apply ``pname=value`` to every widget
