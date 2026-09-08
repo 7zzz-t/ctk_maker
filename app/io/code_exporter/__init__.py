@@ -2100,30 +2100,26 @@ def _emit_subtree(
     # runtime helper redistributes pack children's main-axis size
     # whenever the container resizes (initial map fires <Configure>
     # too — covers first paint without an extra after_idle call).
-    # CTkScrollableFrame needs add="+" — its __init__ already binds
-    # <Configure> to update the inner canvas's scrollregion, and a
-    # plain bind() would replace it (default add=None), leaving the
-    # scrollbar with no content bbox to size against. The +variant
-    # lets both fire so grow children get their flex slot AND the
-    # scrollregion stays accurate. The helper itself works on SF
-    # because SF inherits tk.Frame as its inner content frame —
-    # children pack onto SF directly and SF.pack_slaves() returns
-    # them.
+    # CTkScrollableFrame is deliberately excluded: its children pack
+    # onto the frame whose size is content-driven (scrollable), but
+    # ``balance_pack`` budgets against the frame's ``_parent_canvas``
+    # — the fixed viewport — so every <Configure> would crush grow
+    # children into the viewport height, collapsing the scroll region
+    # to "full" and leaving nothing to scroll. The editor already
+    # treats a scroll frame's content axis as free (height decided by
+    # the content, never auto-distributed into the viewport); the
+    # exporter must not re-introduce viewport budgeting at runtime.
     if (
         child_layout in ("vbox", "hbox") and node.children
         and not is_tabview
+        and node.widget_type != "CTkScrollableFrame"
     ):
         _balance_axis = "height" if child_layout == "vbox" else "width"
-        _bind_extra = (
-            ', add="+"'
-            if node.widget_type == "CTkScrollableFrame" else ""
-        )
         lines.append(
             f"{child_master}.bind("
             f"\"<Configure>\", "
             f"lambda _e, _c={child_master}: "
-            f"ctk.balance_pack(_c, {_balance_axis!r})"
-            f"{_bind_extra})",
+            f"ctk.balance_pack(_c, {_balance_axis!r}))",
         )
         lines.append("")
 

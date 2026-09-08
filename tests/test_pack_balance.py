@@ -215,3 +215,49 @@ def test_needs_pack_balance_false_for_empty_hbox():
     project.add_widget(frame, document_id=doc.id)
     # No children inside.
     assert _project_needs_pack_balance([doc], [frame]) is False
+
+
+def _make_scroll_frame_project(container_widget_type: str):
+    """Window in place layout whose single root container is either a
+    CTkScrollableFrame (content = scrollable vbox) or a plain CTkFrame
+    vbox, each holding two buttons. Returns the generated code."""
+    project = Project()
+    doc = Document(name="MainWindow")
+    doc.window_properties["width"] = 400
+    doc.window_properties["height"] = 300
+    project.documents = [doc]
+    project.active_document_id = doc.id
+    desc = get_descriptor(container_widget_type)
+    props = dict(desc.default_properties)
+    props["width"] = 300
+    props["height"] = 200
+    props["layout_type"] = "vbox"
+    container = WidgetNode(
+        widget_type=container_widget_type, properties=props,
+    )
+    project.add_widget(container, document_id=doc.id)
+    for i in range(2):
+        btn = _make_button(text=f"S{i}")
+        project.add_widget(
+            btn, parent_id=container.id, document_id=doc.id,
+        )
+    return generate_code(project)
+
+
+def test_scrollable_frame_content_gets_no_balance_bind():
+    # CTkScrollableFrame's content frame is scrollable — its size is
+    # content-driven, never viewport-budgeted. balance_pack against it
+    # would crush grow children into the viewport height (scroll region
+    # collapses to "full"), so the exporter must NOT emit the bind.
+    code = _make_scroll_frame_project("CTkScrollableFrame")
+    assert "ctk.balance_pack(" not in code
+    # Children are still emitted as pack children with their min attrs.
+    assert "._ctkmaker_min = " in code
+
+
+def test_plain_vbox_frame_still_gets_balance_bind():
+    # Regression guard: the SF exclusion above must not leak to plain
+    # vbox/hbox frames, which legitimately flex-shrink into a fixed
+    # container height.
+    code = _make_scroll_frame_project("CTkFrame")
+    assert "ctk.balance_pack(" in code
