@@ -1986,10 +1986,8 @@ def _emit_subtree(
     # equal-split — only columns stretch to fill the width.
     _auto_h = False
     if node.widget_type == "CTkFrame":
-        try:
-            _auto_h = int(node.properties.get("height", 0) or 0) <= 0
-        except (TypeError, ValueError):
-            _auto_h = False
+        from app.widgets.extra_params import is_auto_height
+        _auto_h = is_auto_height(node)
     if (
         child_layout != DEFAULT_LAYOUT_TYPE and node.children
         and node.widget_type != "CTkScrollableFrame"
@@ -2175,6 +2173,16 @@ def _emit_widget(
 
     from app.core.variables import BINDING_WIRINGS, parse_var_token
 
+    # First-class auto-height (spec §11): extra height_mode=auto. The
+    # runtime height is content-driven — omit the constructor height
+    # kwarg so CTk grows to its children instead of pinning the
+    # builder's snapshot value. Legacy (height==0) keeps the historic
+    # height=0 emit to stay byte-identical with stock 00.
+    first_class_auto = bool(
+        node.widget_type == "CTkFrame"
+        and (node.extra or {}).get("height_mode") == "auto"
+    )
+
     kwargs: list[tuple[str, str]] = []
     # Wired bindings — emitted at the end so the kwarg order doesn't
     # matter for CTk's __init__, but kept in a separate list because
@@ -2193,6 +2201,8 @@ def _emit_widget(
         # pack_* / grid_* / layout_type live on the node for export,
         # never as CTk constructor kwargs.
         if key in LAYOUT_NODE_ONLY_KEYS:
+            continue
+        if first_class_auto and key == "height":
             continue
         # Phase 1 binding: ``var:<uuid>`` token. Resolve BEFORE the
         # node_only / font / image filter so wired bindings on
