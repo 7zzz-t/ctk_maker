@@ -10,7 +10,10 @@ from app.core.settings import (
     SELECTION_DIRECT_PICK_KEY,
     load_selection_direct_pick,
 )
-from app.ui.workspace.drag_select import fresh_click_target
+from app.ui.workspace.drag_select import (
+    fresh_click_target,
+    selected_in_chain,
+)
 
 
 class _N:
@@ -60,3 +63,15 @@ def test_preference_reads_stored_value(monkeypatch, tmp_path):
     )
     monkeypatch.setattr("app.core.settings.SETTINGS_PATH", path)
     assert load_selection_direct_pick() is True
+
+
+def test_selected_in_chain_detects_press_inside_selection():
+    """Keep-the-selection rule: a press on the selected widget itself or
+    on any of its ancestors counts as "inside the selection"."""
+    chain = [_N("outer"), _N("mid"), _N("leaf")]
+    assert selected_in_chain(chain, "leaf") is True    # clicked widget
+    assert selected_in_chain(chain, "mid") is True     # ancestor
+    assert selected_in_chain(chain, "outer") is True   # outermost
+    assert selected_in_chain(chain, "elsewhere") is False
+    assert selected_in_chain(chain, None) is False
+    assert selected_in_chain([], "leaf") is False

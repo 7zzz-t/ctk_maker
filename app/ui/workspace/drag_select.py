@@ -56,6 +56,16 @@ def fresh_click_target(chain: list, direct_pick: bool):
     return chain[-1] if direct_pick else chain[0]
 
 
+def selected_in_chain(chain: list, current_id) -> bool:
+    """True when the already-selected widget is part of the pressed
+    chain — the clicked widget itself or one of its ancestors. In other
+    words: the press landed on (or inside) the current selection.
+    """
+    if current_id is None:
+        return False
+    return any(node.id == current_id for node in chain)
+
+
 def direct_pick_enabled() -> bool:
     """Read the canvas-click preference (Settings → Selection).
 
@@ -431,6 +441,15 @@ class DragClickResolver:
         chain.reverse()  # [outermost unlocked, ..., clicked-if-unlocked]
         if not chain:
             return None
+        current_id = ctl.project.selected_id
+        # Keep-the-selection rule: if the press landed on (or inside) the
+        # widget the user already selected, drag THAT widget instead of
+        # re-resolving to another depth. Without this, a press on a
+        # selected child that happens to land on a container item
+        # resolves to the container and the drag "grabs the widget
+        # behind" the selection.
+        if selected_in_chain(chain, current_id):
+            return current_id
         if direct_pick_enabled():
             # "Direct pick" preference (Settings → Selection): a fresh
             # click lands on the widget under the cursor instead of its
@@ -445,7 +464,6 @@ class DragClickResolver:
         ctl._last_click_leaf_id = clicked_nid
         ctl._last_click_time_ms = now_ms
 
-        current_id = ctl.project.selected_id
         # Case 1 — fast click on same leaf: drill one level deeper
         # from the current selection toward the leaf.
         if fast_follow_up and current_id is not None:
