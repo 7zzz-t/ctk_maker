@@ -87,6 +87,7 @@ KEY_PREVIEW_CONSOLE_MODE = "preview_console_mode"
 KEY_LANGUAGE = "language"
 KEY_SELECTION_DIRECT_PICK = "selection_direct_pick"
 KEY_DRAG_NO_REPARENT = "drag_no_reparent"
+KEY_STOCK_COMPAT = "stock_compat_enabled"
 
 CONSOLE_MODE_OFF = "off"
 CONSOLE_MODE_WINDOWS = "windows"
@@ -881,84 +882,134 @@ class SettingsDialog(ManagedToplevel):
 
     # ----- Patches tab -----
 
-    def _build_patches(self, parent: tk.Misc) -> tk.Frame:
-        """Optional behaviour patches — opt-in switches that change how
-        the canvas behaves, kept together so they are easy to find:
+    _PATCH_FIXES = (
+        ("fix_place_composite",
+         "A `place` parent holding a multi-part child (CTkScrollableFrame) "
+         "no longer crashes the canvas (configure-then-place)."),
+        ("fix_var_binding",
+         "A `grid_sticky` / `stretch` bound to a variable no longer leaks "
+         "the raw `var:<uuid>` token - canvas and export resolve it."),
+        ("fix_scroll_frame",
+         "Children of a CTkScrollableFrame are no longer stretched to the "
+         "viewport, so the scroll region can't collapse."),
+        ("fix_geometry_sync",
+         "Canvas and model stay in sync: sizes backfill from the rendered "
+         "geometry, managed children drop their stale x/y."),
+        ("fix_drag_behind",
+         "Pressing on an already-selected widget drags THAT widget instead "
+         "of the container behind it."),
+    )
 
-        * Patch 1 - Selection: a click selects the widget under the
-          cursor instead of the outermost unlocked container.
-        * Patch 2 - Drag: dragging never changes the object-tree
-          structure (no reparent, no container extract) — it only moves
-          the widget's x/y.
+    _PATCH_ENHANCEMENTS = (
+        ("enh_axis_params",
+         "Axis size params: main axis fixed/percent/remain, cross axis "
+         "fixed/percent (shown as extra Layout rows)."),
+        ("enh_batch_edit",
+         "Multi-select widgets can be edited (properties and axis params) "
+         "in one step."),
+    )
+
+    _PATCH_COMPAT = (
+        ("compat_px_disk",
+         "On save, a derived size is written as a plain height/width px "
+         "value on the widget itself (`stretch` is never touched)."),
+        ("compat_px_export",
+         "On export, percent / remainder children ship exact px instead of "
+         "the grow/expand path."),
+    )
+
+    def _build_patches(self, parent: tk.Misc) -> tk.Frame:
+        """Optional behaviour patches, grouped by intent:
+
+        * Fixes — upstream defects and canvas/model drift (always on,
+          listed for reference).
+        * Enhancements — new capabilities; the two switches opt into the
+          behaviour changes.
+        * Compatibility — what we write so stock 00 can open the file.
         """
         tab = self._tab_frame(parent)
 
         self._section_label(
-            tab,
-            tr("settings.section.patch_selection", "Patch 1 - Selection"),
+            tab, tr("settings.section.patch_fix", "Fixes"),
         ).pack(anchor="w")
+        for pid, desc in self._PATCH_FIXES:
+            self._patch_note(tab, pid, desc)
+
+        self._section_label(
+            tab, tr("settings.section.patch_enhance", "Enhancements"),
+        ).pack(anchor="w", pady=(16, 0))
+
         self._selection_direct_pick_var = tk.BooleanVar(
             value=bool(self._initial.get(KEY_SELECTION_DIRECT_PICK, False)),
         )
-        cb_row = stk.Frame(tab, bg=BG)
-        cb_row.pack(fill="x", pady=(6, 2))
-        ctk.CTkCheckBox(
-            cb_row,
-            text=tr(
-                "settings.selection.direct_pick",
-                "Click selects the innermost widget (off: outermost container first)",
-            ),
-            variable=self._selection_direct_pick_var,
-            checkbox_width=16, checkbox_height=16,
-            font=ui_font(11),
-            fg_color=style.PRIMARY_BG, hover_color=style.PRIMARY_HOVER,
-        ).pack(anchor="w")
-        self._hint(
-            tab,
-            tr(
-                "settings.selection.hint",
-                "Off (default): clicking a widget nested inside a container "
-                "selects the outermost unlocked container - click the same "
-                "spot again within 800 ms to drill one level deeper, which "
-                "keeps container dragging easy. On: a click always selects "
-                "the widget directly under the cursor; drag a container by "
-                "selecting it in the Object Tree first.",
-            ),
-        ).pack(anchor="w", pady=(6, 0))
+        self._patch_switch(
+            tab, self._selection_direct_pick_var,
+            "enh_direct_pick",
+            "1 - Direct pick: a click selects the deepest widget under the "
+            "cursor (off: the outermost unlocked container first).",
+        )
 
-        self._section_label(
-            tab,
-            tr("settings.section.patch_drag", "Patch 2 - Drag"),
-        ).pack(anchor="w", pady=(16, 0))
         self._drag_no_reparent_var = tk.BooleanVar(
             value=bool(self._initial.get(KEY_DRAG_NO_REPARENT, False)),
         )
-        cb_drag = stk.Frame(tab, bg=BG)
-        cb_drag.pack(fill="x", pady=(6, 2))
+        self._patch_switch(
+            tab, self._drag_no_reparent_var,
+            "enh_drag_no_reparent",
+            "2 - Drag: dragging never changes the tree structure (move x/y "
+            "only).",
+        )
+
+        for pid, desc in self._PATCH_ENHANCEMENTS:
+            self._patch_note(tab, pid, desc)
+
+        self._section_label(
+            tab, tr("settings.section.patch_compat", "Compatibility"),
+        ).pack(anchor="w", pady=(16, 0))
+
+        self._stock_compat_var = tk.BooleanVar(
+            value=bool(self._initial.get(KEY_STOCK_COMPAT, True)),
+        )
+        self._patch_switch(
+            tab, self._stock_compat_var,
+            "compat_stock_rewrite",
+            "On save, rewrite a `place` parent that holds a composite child "
+            "to `vbox`, so stock 00 can open the file.",
+        )
+
+        for pid, desc in self._PATCH_COMPAT:
+            self._patch_note(tab, pid, desc)
+        return tab
+
+    def _patch_note(self, tab, pid: str, desc: str) -> None:
+        """Read-only patch entry - behaviour that is always on."""
+        stk.Label(
+            tab, text="• " + tr(f"settings.patch.{pid}.title", pid),
+            bg=BG, fg=HEADER_FG, font=ui_font(11), anchor="w",
+            justify="left", wraplength=460,
+        ).pack(anchor="w", pady=(8, 0))
+        stk.Label(
+            tab, text=tr(f"settings.patch.{pid}.desc", desc),
+            bg=BG, fg=SIDEBAR_ROW_FG, font=ui_font(10), anchor="w",
+            justify="left", wraplength=460,
+        ).pack(anchor="w")
+
+    def _patch_switch(self, tab, var, pid: str, desc: str) -> None:
+        """Switchable patch entry - a checkbox plus its explanation."""
+        cb_row = stk.Frame(tab, bg=BG)
+        cb_row.pack(fill="x", pady=(8, 0))
         ctk.CTkCheckBox(
-            cb_drag,
-            text=tr(
-                "settings.patch.drag_no_reparent",
-                "Dragging never changes the tree structure (move x/y only)",
-            ),
-            variable=self._drag_no_reparent_var,
+            cb_row,
+            text=tr(f"settings.patch.{pid}.title", pid),
+            variable=var,
             checkbox_width=16, checkbox_height=16,
             font=ui_font(11),
             fg_color=style.PRIMARY_BG, hover_color=style.PRIMARY_HOVER,
         ).pack(anchor="w")
-        self._hint(
-            tab,
-            tr(
-                "settings.patch.drag_hint",
-                "On: dragging a widget on the canvas only changes its x/y. "
-                "It is never moved into (or out of) a container and never "
-                "extracted to the document root, so the Object Tree keeps "
-                "its structure. Off (default): stock behaviour - dropping "
-                "inside another container moves the widget into it, and a "
-                "container child dropped outside is extracted to the root.",
-            ),
-        ).pack(anchor="w", pady=(6, 0))
-        return tab
+        stk.Label(
+            tab, text=tr(f"settings.patch.{pid}.desc", desc),
+            bg=BG, fg=SIDEBAR_ROW_FG, font=ui_font(10), anchor="w",
+            justify="left", wraplength=460,
+        ).pack(anchor="w")
 
     def _build_preview(self, parent: tk.Misc) -> tk.Frame:
         tab = self._tab_frame(parent)
@@ -1184,6 +1235,10 @@ class SettingsDialog(ManagedToplevel):
         save_setting(
             KEY_DRAG_NO_REPARENT,
             bool(self._drag_no_reparent_var.get()),
+        )
+        save_setting(
+            KEY_STOCK_COMPAT,
+            bool(self._stock_compat_var.get()),
         )
         mode = self._preview_console_mode_var.get()
         if mode not in (CONSOLE_MODE_OFF, CONSOLE_MODE_WINDOWS, CONSOLE_MODE_INAPP):

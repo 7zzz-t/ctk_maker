@@ -73,3 +73,12 @@ def load_drag_no_reparent() -> bool:
     Default False = stock behaviour, where dropping inside another
     container moves the widget into that container."""
     return bool(load_settings().get(DRAG_NO_REPARENT_KEY, False))
+
+
+STOCK_COMPAT_ENABLED_KEY = "stock_compat_enabled"
+
+
+def load_stock_compat_enabled() -> bool:
+    """True (default) when saving may rewrite a place parent that holds a
+    composite child to a managed layout, so stock 00 can open the file."""
+    return bool(load_settings().get(STOCK_COMPAT_ENABLED_KEY, True))

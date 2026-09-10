@@ -491,6 +491,31 @@ class Workspace(ctk.CTkFrame):
             walk(root, 0)
         return found
 
+    def _find_widget_at(
+        self, canvas_x: float, canvas_y: float, exclude_id: str | None = None,
+    ):
+        """Deepest widget whose canvas bbox contains the point.
+
+        Unlike ``_find_container_at`` this considers every widget, so
+        the direct-pick selection patch lands on the leaf the user is
+        pointing at even when a container is drawn over it.
+        """
+        from app.ui.workspace.drag_select import deepest_widget_at
+
+        def _bbox(node):
+            entry = self.widget_views.get(node.id)
+            if entry is None:
+                return None
+            widget, _ = entry
+            return self._widget_canvas_bbox(
+                self._anchor_views.get(node.id, widget),
+            )
+
+        return deepest_widget_at(
+            self.project.root_widgets, _bbox, canvas_x, canvas_y,
+            exclude_id=exclude_id,
+        )
+
     # Rendering (document rect + grid + visibility mask) lives in
     # ``render.py``; these thin delegators keep the many internal
     # callers working unchanged.

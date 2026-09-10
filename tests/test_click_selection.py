@@ -113,3 +113,43 @@ def test_drag_no_reparent_reads_stored_value(monkeypatch, tmp_path):
     path.write_text(json.dumps({DRAG_NO_REPARENT_KEY: True}), encoding="utf-8")
     monkeypatch.setattr("app.core.settings.SETTINGS_PATH", path)
     assert load_drag_no_reparent() is True
+
+
+class _Node:
+    def __init__(self, nid, children=(), visible=True):
+        self.id = nid
+        self.children = list(children)
+        self.visible = visible
+
+
+def test_deepest_widget_at_prefers_the_deepest_bbox():
+    """Direct-pick geometry: the deepest widget under the point wins, so
+    a container drawn over its children can't swallow the click."""
+    from app.ui.workspace.drag_select import deepest_widget_at
+
+    inner = _Node("inner")
+    outer = _Node("outer", [inner])
+    boxes = {
+        "outer": (0, 0, 100, 100),
+        "inner": (10, 10, 50, 50),
+    }
+    bbox = lambda n: boxes.get(n.id)          # noqa: E731
+
+    assert deepest_widget_at([outer], bbox, 20, 20).id == "inner"
+    assert deepest_widget_at([outer], bbox, 80, 80).id == "outer"
+    assert deepest_widget_at([outer], bbox, 500, 500) is None
+
+
+def test_deepest_widget_at_skips_hidden_and_excluded():
+    from app.ui.workspace.drag_select import deepest_widget_at
+
+    inner = _Node("inner")
+    outer = _Node("outer", [inner])
+    boxes = {"outer": (0, 0, 100, 100), "inner": (10, 10, 50, 50)}
+    bbox = lambda n: boxes.get(n.id)          # noqa: E731
+
+    inner.visible = False
+    assert deepest_widget_at([outer], bbox, 20, 20).id == "outer"
+    assert deepest_widget_at(
+        [outer], bbox, 20, 20, exclude_id="inner",
+    ).id == "outer"

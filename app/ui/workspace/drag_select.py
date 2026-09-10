@@ -66,6 +66,33 @@ def selected_in_chain(chain: list, current_id) -> bool:
     return any(node.id == current_id for node in chain)
 
 
+def deepest_widget_at(roots, bbox_of, x, y, exclude_id=None):
+    """Deepest widget whose canvas bbox contains ``(x, y)``.
+
+    Same depth rule as ``Workspace._find_container_at`` but applied to
+    *every* widget, not just containers — this is "what the cursor is
+    really over", used by the direct-pick patch so a container drawn
+    over its children can't swallow the click.
+    """
+    best = None
+    best_depth = -1
+    stack = [(root, 0) for root in reversed(list(roots or []))]
+    while stack:
+        node, depth = stack.pop()
+        if exclude_id is not None and node.id == exclude_id:
+            continue
+        if not getattr(node, "visible", True):
+            continue
+        bbox = bbox_of(node)
+        if bbox is not None:
+            x1, y1, x2, y2 = bbox
+            if x1 <= x <= x2 and y1 <= y <= y2 and depth > best_depth:
+                best, best_depth = node, depth
+        for child in reversed(list(getattr(node, "children", None) or [])):
+            stack.append((child, depth + 1))
+    return best
+
+
 def direct_pick_enabled() -> bool:
     """Read the canvas-click preference (Settings → Selection).
 
@@ -215,7 +242,7 @@ class DragClickResolver:
                 return nid
         if len(existing_ids) > 1 and nid in existing_ids:
             return nid
-        resolved = self.resolve_click_target(nid)
+        resolved = self.resolve_click_target(nid, event)
         if resolved is None:
             return None
         ctl.project.select_widget(resolved)
@@ -411,7 +438,25 @@ class DragClickResolver:
         ctl._drag["hidden_mode"] = True
         ctl._drag["placeholder_id"] = placeholder_id
 
-    def resolve_click_target(self, clicked_nid: str) -> str | None:
+    def _widget_under_cursor(self, event) -> str | None:
+        """Id of the deepest unlocked widget whose canvas bbox contains
+        the press point, or None when it can't be resolved."""
+        if event is None:
+            return None
+        ctl = self.controller
+        ws = ctl.workspace
+        try:
+            cx, cy = ws._screen_to_canvas(event.x_root, event.y_root)
+            node = ws._find_widget_at(cx, cy)
+        except Exception:
+            return None
+        if node is None or ws._effective_locked(node.id):
+            return None
+        return node.id
+
+    def resolve_click_target(
+        self, clicked_nid: str, event=None,
+    ) -> str | None:
         """Drill-down selection gated by a fast-click window.
 
         Revised semantics (v0.0.15.17):
@@ -458,9 +503,14 @@ class DragClickResolver:
             ctl._kept_selection = True
             return current_id
         if direct_pick_enabled():
-            # "Direct pick" preference (Settings → Selection): a fresh
-            # click lands on the widget under the cursor instead of its
-            # outermost unlocked ancestor.
+            # "Direct pick" patch (Settings → Patches): the click lands
+            # on the widget actually under the cursor. Resolve it
+            # geometrically (deepest bbox containing the press point) so
+            # a container drawn over its children can't swallow the
+            # click; fall back to the clicked chain's leaf.
+            hit = self._widget_under_cursor(event)
+            if hit is not None:
+                return hit
             return fresh_click_target(chain, True).id
         now_ms = int(ws.tk.call("clock", "milliseconds"))
         same_leaf = clicked_nid == ctl._last_click_leaf_id
