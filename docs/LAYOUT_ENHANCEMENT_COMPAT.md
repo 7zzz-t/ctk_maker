@@ -61,7 +61,8 @@
 | stretch="fixed" | `stretch="fixed"` | 直落 |
 | stretch="fill" | `stretch="fill"` | 直落 |
 | stretch="grow" | `stretch="grow"` | 直落 |
-| 主轴 40% / 剩余 ×N | 私有键（见下）+ **磁盘烘焙**：`fill` + 精确主轴 px（见 §11.8，替代早期 grow 近似） | 烘焙快照 |
+| 主轴 fixed/percent/remain | 私有键（见下）+ **磁盘烘焙**：派生 px 写入子控件自身 `height`/`width`（见 §11.8） | 烘焙快照 |
+| 交叉轴 fixed/percent | 同上：派生 px 写入子控件自身 `width`/`height`；**不写 `stretch`** | 烘焙快照 |
 | grid 子 "贴边/铺满" | `grid_sticky` 原值（00 原生） | 直落 |
 | auto-height（height=0） | 已回退删除（`dec-c38f4c7beb71fa68`）；00 legacy `<=0` 保留 | — |
 
@@ -156,10 +157,13 @@
 - [ ] 导出无残留收尾（第八节清单）；
 - [x] 新参数类别机制设计 → 见第十一节（决策 `dec-aa6eedbd648307d7` 一步到位全做）。
 
-### 9.4 已知原版缺陷（00 自身，非 02 引入；决策 `dec-2e1566ae90a10710`：接受并记录）
+### 9.4 已知原版缺陷（00 自身，非 02 引入）
 
-**现象**：工程若含「父容器 `layout_type=place` + 子控件为多部件（composite，
-`anchor_widget is not widget`，如 CTkScrollableFrame / CTkTabview）」结构，
+> 决策更新：`dec-b7fb7bfe6c875652`（不改原版 00，仅 02 侧处理）+
+> `dec-e1e9ce0c4e939463`（**保存时静默自动修复**）。
+
+**现象**：工程若含「父容器 `layout_type=place`（或未设）+ 子控件为多部件
+（composite，`anchor_widget is not widget`，目前仅 **`CTkScrollableFrame`**）」结构，
 **原版 00 打开即崩**：
 
 ```
@@ -170,13 +174,30 @@
 
 **性质**：
 - 00 的 `_place_nested` 对 composite 唯一地调用 `place(width,height)`；该组合无论
-  由 00 还是 02 生成，官方 00 都崩（00 自己甚至无法现场创建该结构——放置即崩）；
+  由 00 还是 02 生成，原版 00 都崩（00 自己甚至无法现场创建该结构——放置即崩）；
 - 02 已修复同一缺陷（`ac2177e`：先 `configure(w/h)` 再 `place(x,y)`），02 打开正常；
+- **00 的导出器不受影响**：其 place 分支只生成 `place(x=…, y=…)`，不含 width/height
+  （`app/io/code_exporter/__init__.py`），导出的 .py 可正常运行；
 - 与增强参数、`_ctkmaker_meta`、percent 等**无任何因果**——换 sidecar 存参数同样崩。
 
-**处置**：接受为 00 原版缺陷并记录，不补丁 00、不改工程结构。含该结构的工程请用
-02 打开/编辑；跨 00 使用前需把 composite 父改为 vbox/grid（受管布局走 pack/grid，
-00 不会 `place(w/h)`）。实测样例：`MainPage` 工程含 9 处该结构。
+**处置（02 侧自动，不改原版 00）**：`app/io/stock_compat.py` 在**每次保存前**扫描
+文档树，把「place/未设布局的父容器（含窗口）+ 其子控件含 composite」的父容器
+`layout_type` **静默改写为 `vbox`**（受管布局 → 00 走 pack 分支，不再 `place(w/h)`）。
+改写幂等、只作用于确有 composite 子控件的 place 类父容器；命中的一级复合关系包括
+窗口（`window_properties`）与任意节点（`properties`）。已实现于 `save_project`，
+新增测试 `tests/test_stock_compat.py`。
+
+**残留代价**：被改写的容器由 place 变为 vbox（子控件改按 pack 堆叠）——这是"向 00
+靠齐"不可避免的语义变化，已在保存时自动完成，用户无需手工调整。
+
+---
+
+### 9.5 待办：02 允许创建 00 打不开的结构
+
+- 现状：02 画布已修复 composite-on-place，故 02 内可以放置/保存该结构；保存时由
+  §9.4 的 stock 兼容层自动改写父容器，避免产出 00 打不开的工程文件。
+- [ ] 编辑期提示：把 composite 拖入 place 容器时给出提示（说明保存时会自动改为
+  vbox），避免用户对"保存后布局变了"感到意外。
 
 ---
 
@@ -200,12 +221,21 @@
   `properties`**（00 全量传 CTk 构造器会崩，见第三节）。
 - 00 另存按白名单丢弃顶层键 → 节点降级为快照值（预期，见第六节）。
 
-### 11.3 参数清单（现行）
+### 11.3 参数清单（现行 · 2026-09-10 两轴参数化）
+
+> **修订（两轴参数化，不再依托 `stretch`）**：两轴参数与「拉伸」本质相同 ——
+> 都只是决定子控件的**尺寸数值**，两轴只是把数值**参数化算出来**（免手算）。
+> 派生结果写入子控件自身的 `height` / `width`，等同于手填；`stretch` 永不被
+> 派生逻辑改写，保持用户选择（默认 `fixed`），故 00 打开同一文档行为一致。
 
 | 参数 | 适用 | 取值 | 语义 | 原版快照/磁盘 |
 |---|---|---|---|---|
-| `main_axis.mode` | vbox/hbox 子 | `content`(默认) / `percent` / `remain` | content=自然；percent=父主轴 N%；remain=吃剩余 | 内存/导出 `stretch:grow`（响应式）；磁盘烘焙 `fill`+精确 px（§11.8） |
+| `main_axis.mode` | vbox/hbox 子 | `fixed`(默认) / `percent` / `remain` | fixed=用自身 H/W；percent=父主轴 N%；remain=均分（扣固定+百分比后）剩余 | 派生 px 写入子控件自身 `height`/`width`（§11.8） |
 | `main_axis.percent` | 同上 | 1–100 | 仅 mode=percent 生效 | 见上 |
+| `cross_axis.mode` | vbox/hbox 子 | `fixed`(默认) / `percent` | fixed=用自身 W/H；percent=父交叉轴 N%（100%=铺满） | 派生 px 写入自身 `width`/`height` |
+| `cross_axis.percent` | 同上 | 1–100 | 仅 mode=percent 生效 | 见上 |
+
+> 兼容：旧文件中的 `main_axis.mode="content"` 读取时归一化为 `fixed`。
 
 > **已回退**（`dec-c38f4c7beb71fa68`，2026-09-09）：原 v1 曾含 `height_mode`
 > （auto 高度）参数与 `height=0`/200+marker 磁盘映射，经实测确认后**全部删除**。
@@ -213,15 +243,21 @@
 
 ### 11.4 UI（仅 02 显示，00 面板天然无这些行）
 
-- vbox/hbox 子的 Layout 组尾部：「主轴：内容 | 百分比 | 剩余」，percent 时出现
-  数值行（1–100）；批量同值/异值汇总、undo 见实施记录。
+- vbox/hbox 子的 Layout 组尾部：「主轴：固定(数值) | 百分比 | 剩余」与
+  「交叉轴：固定(数值) | 百分比」；各自在选中 percent 时出现数值行（1–100）；
+  固定(数值) 无额外输入框，直接用该控件自身的 H/W 行。批量同值/异值汇总、
+  undo 见实施记录。
 
 ### 11.5 导出（不残留，静态化）
 
-- percent（定高父）→ 导出时按父主轴固定尺寸**静态算 px**：
-  `h_px = round(parent_main_px × percent/100)` → 写 `configure(height=h_px)`；
-- remain → `stretch="grow"`（运行时框架均分剩余，零残留）；
-- percent/remain 在自由轴父（scroll 内容 / 高度 0）→ 降级 content（与编辑器一致）。
+- percent（该轴父尺寸固定）→ 导出时静态算 px `round(parent_axis_px × N%)`
+  → 写构造参数 `height=` / `width=`（两轴同理）；
+- remain → 同样导出**精确 px**（扣固定与百分比后均分），不再用
+  `stretch:"grow"` + `expand=True`；
+- 自由轴父（scroll 内容 / 该轴尺寸 ≤0）→ 降级 `fixed`，用子控件自身尺寸
+  （与编辑器、落盘一致）；
+- `stretch` 保持用户值：仅当派生尺寸遇到残留 `grow` 时降级为 `fixed`，
+  避免被重新拉伸。
 
 ### 11.6 迁移
 

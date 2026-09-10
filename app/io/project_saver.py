@@ -131,6 +131,14 @@ def save_project(project: Project, path: str | Path) -> None:
     edits made in this session land alongside the page state.
     """
     path = Path(path)
+    # Stock-00 compatibility (spec §9.4): a composite child (e.g.
+    # CTkScrollableFrame) under a place / unset parent makes stock 00
+    # crash on load (its canvas calls place(width=…, height=…), which
+    # ctkmaker-core rejects). Rewrite those parents to a managed layout
+    # before serialising so the saved file stays openable by stock 00.
+    from app.io.stock_compat import normalize_project_for_stock
+    for owner, before, after in normalize_project_for_stock(project):
+        log_error(f"stock-compat rewrite: {owner} layout {before} -> {after}")
     data = project_to_dict(project)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
