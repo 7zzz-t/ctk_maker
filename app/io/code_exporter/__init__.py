@@ -2066,16 +2066,24 @@ def _emit_subtree(
     )
     is_tabview = node.widget_type == "CTkTabview"
     tab_names_for_fallback: list[str] = []
+    tab_default_slot: str | None = None
     if is_tabview:
         raw = node.properties.get("tab_names") or ""
         tab_names_for_fallback = [
             ln.strip() for ln in str(raw).splitlines() if ln.strip()
         ] or ["Tab 1"]
+        # A child with no (valid) slot lands in the tabview current
+        # selection (initial_tab) before falling back to the first.
+        _initial = str(
+            node.properties.get("initial_tab") or "",
+        ).strip()
+        if _initial in tab_names_for_fallback:
+            tab_default_slot = _initial
     for idx, child in enumerate(node.children):
         if is_tabview:
             slot = getattr(child, "parent_slot", None)
             if not slot or slot not in tab_names_for_fallback:
-                slot = tab_names_for_fallback[0]
+                slot = tab_default_slot or tab_names_for_fallback[0]
             child_master_for_child = f"{child_master}.tab({slot!r})"
         else:
             child_master_for_child = child_master

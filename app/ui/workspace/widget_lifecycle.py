@@ -274,7 +274,7 @@ class WidgetLifecycle:
         self.widget_views[node.id] = (widget, window_id)
         ws._bind_widget_events(anchor_widget, node.id)
         if node.widget_type == "CTkTabview":
-            self._wire_tabview_selection_refresh(widget)
+            self._wire_tabview_selection_refresh(widget, node)
         if not node.visible:
             self._set_widget_visibility(widget, window_id, node, False)
         # CTkScrollableFrame with place layout: pin the inner frame's
@@ -339,7 +339,7 @@ class WidgetLifecycle:
             if anchor is not None:
                 self.layout_overlay._backfill_actual_size(anchor, child)
 
-    def _wire_tabview_selection_refresh(self, tabview) -> None:
+    def _wire_tabview_selection_refresh(self, tabview, node=None) -> None:
         """Route CTk's tab-switch callback to the selection controller
         so chrome around a child widget in the just-hidden tab doesn't
         stay stamped on the canvas. The callback fires AFTER CTk
@@ -347,6 +347,26 @@ class WidgetLifecycle:
         `_bbox_for` are settled by the time we redraw.
         """
         def _on_tab_switched(*_a, **_kw) -> None:
+            if node is not None:
+                try:
+                    current = tabview.get()
+                except Exception:
+                    current = None
+                names = [
+                    ln.strip()
+                    for ln in str(
+                        node.properties.get("tab_names") or "",
+                    ).splitlines() if ln.strip()
+                ]
+                if (
+                    current and current in names
+                    and node.properties.get("initial_tab") != current
+                ):
+                    node.properties["initial_tab"] = current
+                    try:
+                        self.project.event_bus.publish("dirty_changed", True)
+                    except Exception:
+                        pass
             self.workspace.after_idle(self.selection.draw)
         tabview._command = _on_tab_switched
 

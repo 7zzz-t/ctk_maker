@@ -240,12 +240,15 @@ class CTkTabviewDescriptor(WidgetDescriptor):
         rename_map: dict[str, str] = {}
         if len(removed) == 1 and len(added) == 1:
             rename_map[removed[0]] = added[0]
+        fallback = str(node.properties.get("initial_tab") or "").strip()
+        if fallback not in new_names:
+            fallback = new_names[0]
         for child in node.children:
             slot = getattr(child, "parent_slot", None)
             if slot in rename_map:
                 child.parent_slot = rename_map[slot]
             elif slot not in new_names:
-                child.parent_slot = new_names[0]
+                child.parent_slot = fallback
 
     @classmethod
     def child_master(cls, widget, child_node):
@@ -263,6 +266,17 @@ class CTkTabviewDescriptor(WidgetDescriptor):
         if slot and slot in names:
             try:
                 return widget.tab(slot)
+            except Exception:
+                pass
+        # No (valid) slot — fall back to the tab the user is actually
+        # looking at (CTk's live selection) before the first one.
+        try:
+            current = widget.get()
+        except Exception:
+            current = None
+        if current and current in names:
+            try:
+                return widget.tab(current)
             except Exception:
                 pass
         try:

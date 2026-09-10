@@ -1484,6 +1484,32 @@ class ObjectTreePanel(ctk.CTkFrame):
         # Tree drag has no cursor position — without a reset the widget
         # would keep its old absolute x/y (valid for the old parent's
         # space) and land off-screen or overlapping inside the new one.
+        # Tabview target: stamp the child tab slot from the tabview
+        # current selection (initial_tab) so a tree drop lands in the
+        # tab the user is looking at instead of the silent first-tab
+        # fallback. Undo/redo carry the old/new slot too.
+        old_parent_slot = getattr(node, "parent_slot", None)
+        new_parent_slot: str | None = None
+        if parent_id:
+            parent_node = self.project.get_widget(parent_id)
+            if (
+                parent_node is not None
+                and parent_node.widget_type == "CTkTabview"
+            ):
+                names = [
+                    ln.strip()
+                    for ln in str(
+                        parent_node.properties.get("tab_names") or "",
+                    ).splitlines() if ln.strip()
+                ]
+                pick = str(
+                    parent_node.properties.get("initial_tab") or "",
+                ).strip()
+                if pick in names:
+                    new_parent_slot = pick
+                elif names:
+                    new_parent_slot = names[0]
+        node.parent_slot = new_parent_slot
         self._reset_position_for_tree_reparent(source_id, parent_id)
         try:
             new_x = int(node.properties.get("x", 0))
@@ -1532,6 +1558,8 @@ class ObjectTreePanel(ctk.CTkFrame):
                 new_y=new_y,
                 old_document_id=old_doc_id,
                 new_document_id=new_doc_id,
+                old_parent_slot=old_parent_slot,
+                new_parent_slot=new_parent_slot,
             ),
         )
 
