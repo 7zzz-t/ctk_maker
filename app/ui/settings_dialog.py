@@ -219,6 +219,9 @@ class SettingsDialog(ManagedToplevel):
         # Priority order — Workspace + Preview on top because they
         # affect every working session; Appearance last because the
         # theme dropdown is currently disabled.
+        # _tab_frame registers the scroll container each padded panel
+        # lives in; _select_tab packs the scroll, not the panel.
+        self._tab_scrolls = {}
         tabs = [
             ("workspace", tr("settings.tab.workspace", "Workspace"), self._build_workspace),
             ("preview", tr("settings.tab.preview", "Preview"), self._build_preview),
@@ -231,6 +234,7 @@ class SettingsDialog(ManagedToplevel):
         ]
         for tab_id, display_name, builder in tabs:
             panel = builder(content)
+            panel = self._tab_scrolls.pop(panel, panel)
             # Built but not packed — _select_tab will pack the active
             # one and forget the previous.
             self._tab_panels[tab_id] = panel
@@ -276,8 +280,21 @@ class SettingsDialog(ManagedToplevel):
         self._selected_tab = name
 
     def _tab_frame(self, parent: tk.Misc) -> tk.Frame:
-        f = stk.Frame(parent, bg=BG, padx=14, pady=12)
-        return f
+        """Padded, scrollable tab body.
+
+        Panels can be taller than the dialog (the Patches tab lists every
+        patch), so the body lives in a CTkScrollableFrame; ``_select_tab``
+        packs / forgets that scroll container while children keep going
+        into the padded inner frame exactly as before.
+        """
+        scroll = ctk.CTkScrollableFrame(
+            parent, fg_color=BG, corner_radius=0,
+            scrollbar_button_color=SIDEBAR_ROW_HOVER_BG,
+        )
+        inner = stk.Frame(scroll, bg=BG, padx=14, pady=12)
+        inner.pack(fill="both", expand=True)
+        self._tab_scrolls[inner] = scroll
+        return inner
 
     def _section_label(self, parent: tk.Misc, text: str) -> tk.Label:
         return stk.Label(
@@ -985,12 +1002,12 @@ class SettingsDialog(ManagedToplevel):
         stk.Label(
             tab, text="• " + tr(f"settings.patch.{pid}.title", pid),
             bg=BG, fg=HEADER_FG, font=ui_font(11), anchor="w",
-            justify="left", wraplength=460,
+            justify="left", wraplength=440,
         ).pack(anchor="w", pady=(8, 0))
         stk.Label(
             tab, text=tr(f"settings.patch.{pid}.desc", desc),
             bg=BG, fg=SIDEBAR_ROW_FG, font=ui_font(10), anchor="w",
-            justify="left", wraplength=460,
+            justify="left", wraplength=440,
         ).pack(anchor="w")
 
     def _patch_switch(self, tab, var, pid: str, desc: str) -> None:
@@ -1008,7 +1025,7 @@ class SettingsDialog(ManagedToplevel):
         stk.Label(
             tab, text=tr(f"settings.patch.{pid}.desc", desc),
             bg=BG, fg=SIDEBAR_ROW_FG, font=ui_font(10), anchor="w",
-            justify="left", wraplength=460,
+            justify="left", wraplength=440,
         ).pack(anchor="w")
 
     def _build_preview(self, parent: tk.Misc) -> tk.Frame:
