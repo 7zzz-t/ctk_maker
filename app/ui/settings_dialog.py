@@ -86,6 +86,7 @@ KEY_PREVIEW_CONSOLE = "preview_show_console"
 KEY_PREVIEW_CONSOLE_MODE = "preview_console_mode"
 KEY_LANGUAGE = "language"
 KEY_SELECTION_DIRECT_PICK = "selection_direct_pick"
+KEY_DRAG_NO_REPARENT = "drag_no_reparent"
 
 CONSOLE_MODE_OFF = "off"
 CONSOLE_MODE_WINDOWS = "windows"
@@ -222,7 +223,7 @@ class SettingsDialog(ManagedToplevel):
             ("preview", tr("settings.tab.preview", "Preview"), self._build_preview),
             ("defaults", tr("settings.tab.defaults", "Defaults"), self._build_defaults),
             ("editor", tr("settings.tab.editor", "Editor"), self._build_editor),
-            ("selection", tr("settings.tab.selection", "Selection"), self._build_selection),
+            ("patches", tr("settings.tab.patches", "Patches"), self._build_patches),
             ("autosave", tr("settings.tab.autosave", "Autosave"), self._build_autosave),
             ("notifications", tr("settings.tab.notifications", "Notifications"), self._build_notifications),
             ("appearance", tr("settings.tab.appearance", "Appearance"), self._build_appearance),
@@ -878,18 +879,24 @@ class SettingsDialog(ManagedToplevel):
 
     # ----- Preview tab -----
 
-    # ----- Selection tab -----
+    # ----- Patches tab -----
 
-    def _build_selection(self, parent: tk.Misc) -> tk.Frame:
-        """Canvas click-selection preference. Stock behaviour selects
-        the outermost unlocked container on a fresh click; "direct pick"
-        selects the widget under the cursor instead."""
+    def _build_patches(self, parent: tk.Misc) -> tk.Frame:
+        """Optional behaviour patches — opt-in switches that change how
+        the canvas behaves, kept together so they are easy to find:
+
+        * Patch 1 - Selection: a click selects the widget under the
+          cursor instead of the outermost unlocked container.
+        * Patch 2 - Drag: dragging never changes the object-tree
+          structure (no reparent, no container extract) — it only moves
+          the widget's x/y.
+        """
         tab = self._tab_frame(parent)
+
         self._section_label(
             tab,
-            tr("settings.section.selection", "Canvas click selection"),
+            tr("settings.section.patch_selection", "Patch 1 - Selection"),
         ).pack(anchor="w")
-
         self._selection_direct_pick_var = tk.BooleanVar(
             value=bool(self._initial.get(KEY_SELECTION_DIRECT_PICK, False)),
         )
@@ -906,19 +913,51 @@ class SettingsDialog(ManagedToplevel):
             font=ui_font(11),
             fg_color=style.PRIMARY_BG, hover_color=style.PRIMARY_HOVER,
         ).pack(anchor="w")
-
         self._hint(
             tab,
             tr(
                 "settings.selection.hint",
                 "Off (default): clicking a widget nested inside a container "
-                "selects the outermost unlocked container — click the same "
+                "selects the outermost unlocked container - click the same "
                 "spot again within 800 ms to drill one level deeper, which "
                 "keeps container dragging easy. On: a click always selects "
                 "the widget directly under the cursor; drag a container by "
                 "selecting it in the Object Tree first.",
             ),
-        ).pack(anchor="w", pady=(10, 0))
+        ).pack(anchor="w", pady=(6, 0))
+
+        self._section_label(
+            tab,
+            tr("settings.section.patch_drag", "Patch 2 - Drag"),
+        ).pack(anchor="w", pady=(16, 0))
+        self._drag_no_reparent_var = tk.BooleanVar(
+            value=bool(self._initial.get(KEY_DRAG_NO_REPARENT, False)),
+        )
+        cb_drag = stk.Frame(tab, bg=BG)
+        cb_drag.pack(fill="x", pady=(6, 2))
+        ctk.CTkCheckBox(
+            cb_drag,
+            text=tr(
+                "settings.patch.drag_no_reparent",
+                "Dragging never changes the tree structure (move x/y only)",
+            ),
+            variable=self._drag_no_reparent_var,
+            checkbox_width=16, checkbox_height=16,
+            font=ui_font(11),
+            fg_color=style.PRIMARY_BG, hover_color=style.PRIMARY_HOVER,
+        ).pack(anchor="w")
+        self._hint(
+            tab,
+            tr(
+                "settings.patch.drag_hint",
+                "On: dragging a widget on the canvas only changes its x/y. "
+                "It is never moved into (or out of) a container and never "
+                "extracted to the document root, so the Object Tree keeps "
+                "its structure. Off (default): stock behaviour - dropping "
+                "inside another container moves the widget into it, and a "
+                "container child dropped outside is extracted to the root.",
+            ),
+        ).pack(anchor="w", pady=(6, 0))
         return tab
 
     def _build_preview(self, parent: tk.Misc) -> tk.Frame:
@@ -1141,6 +1180,10 @@ class SettingsDialog(ManagedToplevel):
         save_setting(
             KEY_SELECTION_DIRECT_PICK,
             bool(self._selection_direct_pick_var.get()),
+        )
+        save_setting(
+            KEY_DRAG_NO_REPARENT,
+            bool(self._drag_no_reparent_var.get()),
         )
         mode = self._preview_console_mode_var.get()
         if mode not in (CONSOLE_MODE_OFF, CONSOLE_MODE_WINDOWS, CONSOLE_MODE_INAPP):

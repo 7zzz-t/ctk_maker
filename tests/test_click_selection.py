@@ -86,3 +86,30 @@ def test_container_extract_is_skipped_for_kept_selection():
     assert uses_container_extract(True, True) is False     # keep-selection
     assert uses_container_extract(False, False) is False
     assert uses_container_extract(False, True) is False
+
+
+def test_drag_patch_predicate():
+    """Patch 2 — Drag: when on, no release step may reparent."""
+    from app.ui.workspace.drag_release import allows_structure_change
+    assert allows_structure_change(False) is True    # stock behaviour
+    assert allows_structure_change(True) is False    # patch on
+
+
+def test_drag_no_reparent_defaults_off(monkeypatch, tmp_path):
+    from app.core.settings import load_drag_no_reparent
+    monkeypatch.setattr(
+        "app.core.settings.SETTINGS_PATH", tmp_path / "settings.json",
+    )
+    assert load_drag_no_reparent() is False
+
+
+def test_drag_no_reparent_reads_stored_value(monkeypatch, tmp_path):
+    import json
+    from app.core.settings import (
+        DRAG_NO_REPARENT_KEY,
+        load_drag_no_reparent,
+    )
+    path = tmp_path / "settings.json"
+    path.write_text(json.dumps({DRAG_NO_REPARENT_KEY: True}), encoding="utf-8")
+    monkeypatch.setattr("app.core.settings.SETTINGS_PATH", path)
+    assert load_drag_no_reparent() is True

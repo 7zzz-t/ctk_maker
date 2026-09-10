@@ -25,6 +25,16 @@ import tkinter as tk
 from app.core.commands import BulkMoveCommand
 
 
+def allows_structure_change(drag_no_reparent_pref: bool) -> bool:
+    """Whether release may reparent the dragged widget.
+
+    The "drag never changes the tree" patch switches this off, which
+    disables every reparenting release step (container extract, grid
+    cross-parent drop, plain reparent) — a drag then only moves x/y.
+    """
+    return not drag_no_reparent_pref
+
+
 def uses_container_extract(
     started_in_container: bool, kept_selection: bool,
 ) -> bool:

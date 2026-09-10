@@ -62,3 +62,14 @@ def load_selection_direct_pick() -> bool:
     click land on the innermost clicked widget.
     """
     return bool(load_settings().get(SELECTION_DIRECT_PICK_KEY, False))
+
+
+DRAG_NO_REPARENT_KEY = "drag_no_reparent"
+
+
+def load_drag_no_reparent() -> bool:
+    """True when the drag patch is on: dragging a widget only changes its
+    x/y and never reparents it, so the object tree keeps its structure.
+    Default False = stock behaviour, where dropping inside another
+    container moves the widget into that container."""
+    return bool(load_settings().get(DRAG_NO_REPARENT_KEY, False))

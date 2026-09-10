@@ -32,6 +32,7 @@ from app.ui.workspace.drag_ghost import DragGhost
 from app.ui.workspace.drag_motion import DragMotion
 from app.ui.workspace.drag_release import (
     DragRelease,
+    allows_structure_change,
     uses_container_extract,
 )
 from app.ui.workspace.drag_reparent import DragReparent
@@ -320,7 +321,12 @@ class WidgetDragController:
             # document's root at a default position. Blocks the "drag
             # straight from one container to another" shortcut because
             # mid-layout moves were getting confusing in practice.
-            if uses_container_extract(
+            # "Drag never changes the tree" patch (Settings -> Patches):
+            # when on, skip every release step that could reparent the
+            # widget and only record the x/y move.
+            from app.core.settings import load_drag_no_reparent
+            tree_change_ok = allows_structure_change(load_drag_no_reparent())
+            if tree_change_ok and uses_container_extract(
                 started_in_container, drag.get("kept_selection", False),
             ):
                 if self.reparent.maybe_extract_from_container(event, drag):
@@ -328,12 +334,21 @@ class WidgetDragController:
                     return
                 # Dropped inside source container — fall through to
                 # normal move / grid cell-snap paths.
-            elif self.release_handler.should_snap_back(cx_r, cy_r, drag):
+            elif (
+                not started_in_container
+                and self.release_handler.should_snap_back(cx_r, cy_r, drag)
+            ):
                 self.release_handler.apply_snap_back(drag)
                 return
-            grid_handled = self.reparent.maybe_grid_drop(event, drag)
+            grid_handled = (
+                self.reparent.maybe_grid_drop(event, drag)
+                if tree_change_ok else False
+            )
             if not grid_handled:
-                reparented = self.reparent.maybe_reparent_dragged(event, drag)
+                reparented = (
+                    self.reparent.maybe_reparent_dragged(event, drag)
+                    if tree_change_ok else False
+                )
                 # Skip the Move record if the widget jumped parents — a
                 # proper ReparentCommand captures the full before/after,
                 # Move would duplicate part of that record.
