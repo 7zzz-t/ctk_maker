@@ -75,3 +75,14 @@ def test_selected_in_chain_detects_press_inside_selection():
     assert selected_in_chain(chain, "elsewhere") is False
     assert selected_in_chain(chain, None) is False
     assert selected_in_chain([], "leaf") is False
+
+
+def test_container_extract_is_skipped_for_kept_selection():
+    """A press inside the current selection must not run the container
+    extract-only shortcut — that hops the widget to the document root
+    and reads as it disappearing after the drop."""
+    from app.ui.workspace.drag_release import uses_container_extract
+    assert uses_container_extract(True, False) is True     # stock
+    assert uses_container_extract(True, True) is False     # keep-selection
+    assert uses_container_extract(False, False) is False
+    assert uses_container_extract(False, True) is False

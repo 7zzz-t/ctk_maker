@@ -30,7 +30,10 @@ import tkinter as tk
 
 from app.ui.workspace.drag_ghost import DragGhost
 from app.ui.workspace.drag_motion import DragMotion
-from app.ui.workspace.drag_release import DragRelease
+from app.ui.workspace.drag_release import (
+    DragRelease,
+    uses_container_extract,
+)
 from app.ui.workspace.drag_reparent import DragReparent
 from app.ui.workspace.drag_select import (
     HIDE_THRESHOLD,
@@ -188,6 +191,10 @@ class WidgetDragController:
             "last_mx": event.x_root,
             "last_my": event.y_root,
             "moved": False,
+            # True when the press landed on the already-selected widget
+            # (see DragClickResolver) — release then skips the container
+            # extract-only shortcut for this gesture.
+            "kept_selection": bool(getattr(self, "_kept_selection", False)),
             # Per-widget starting position for group drag — iterated
             # on every motion event so all selected place widgets
             # shift by the same delta.
@@ -313,7 +320,9 @@ class WidgetDragController:
             # document's root at a default position. Blocks the "drag
             # straight from one container to another" shortcut because
             # mid-layout moves were getting confusing in practice.
-            if started_in_container:
+            if uses_container_extract(
+                started_in_container, drag.get("kept_selection", False),
+            ):
                 if self.reparent.maybe_extract_from_container(event, drag):
                     ws._update_widget_visibility_across_docs()
                     return

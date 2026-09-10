@@ -25,6 +25,20 @@ import tkinter as tk
 from app.core.commands import BulkMoveCommand
 
 
+def uses_container_extract(
+    started_in_container: bool, kept_selection: bool,
+) -> bool:
+    """Whether release should run the container "extract-only" shortcut.
+
+    Container children are normally extracted to the document root when
+    dropped outside their container. That shortcut is skipped for a
+    "keep the selection" gesture (the press landed on the widget the
+    user had already selected): the user asked to *move that widget*,
+    and hopping it to the root reads as it vanishing.
+    """
+    return bool(started_in_container) and not kept_selection
+
+
 class DragRelease:
     """Per-controller release-time helper. See module docstring."""
 

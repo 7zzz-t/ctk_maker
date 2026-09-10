@@ -103,6 +103,9 @@ class DragClickResolver:
         """
         ctl = self.controller
         ws = ctl.workspace
+        # Reset the "kept selection" flag; resolve_click_target sets it
+        # when the press landed on the already-selected widget.
+        ctl._kept_selection = False
         multi = bool(event.state & 0x0004)
         existing_ids = set(
             getattr(ctl.project, "selected_ids", set()) or set(),
@@ -449,6 +452,10 @@ class DragClickResolver:
         # resolves to the container and the drag "grabs the widget
         # behind" the selection.
         if selected_in_chain(chain, current_id):
+            # Remember that this gesture moves the current selection so
+            # the release path can skip the container extract-only
+            # shortcut (which would hop the widget to the document root).
+            ctl._kept_selection = True
             return current_id
         if direct_pick_enabled():
             # "Direct pick" preference (Settings → Selection): a fresh
