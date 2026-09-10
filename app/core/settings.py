@@ -46,3 +46,19 @@ def load_description_hints() -> list[str]:
 def save_description_hints(hints: list[str]) -> None:
     cleaned = [h for h in hints if isinstance(h, str) and h.strip()]
     save_setting("description_hints", cleaned)
+
+
+# --- Canvas interaction preferences ----------------------------------
+SELECTION_DIRECT_PICK_KEY = "selection_direct_pick"
+
+
+def load_selection_direct_pick() -> bool:
+    """True when a canvas click should select the widget *under the
+    cursor* instead of the outermost unlocked ancestor.
+
+    Default ``False`` keeps the stock Unity-style drill-down: the first
+    click selects the outermost container and a fast follow-up click
+    (within the drill window) descends one level. ``True`` makes a plain
+    click land on the innermost clicked widget.
+    """
+    return bool(load_settings().get(SELECTION_DIRECT_PICK_KEY, False))

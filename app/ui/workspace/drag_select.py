@@ -43,6 +43,32 @@ HIDE_THRESHOLD = 10
 HIDE_OUTLINE_COLOR = "#3b8ed0"
 
 
+def fresh_click_target(chain: list, direct_pick: bool):
+    """Widget a fresh (non-drill) canvas click should select.
+
+    ``chain`` is ``[outermost unlocked ancestor, …, clicked widget]``.
+    Stock behaviour returns the outermost ancestor; the "direct pick"
+    preference (Settings → Selection) returns the widget under the
+    cursor instead.
+    """
+    if not chain:
+        return None
+    return chain[-1] if direct_pick else chain[0]
+
+
+def direct_pick_enabled() -> bool:
+    """Read the canvas-click preference (Settings → Selection).
+
+    Falls back to the stock drill-down behaviour when the preference
+    can't be read for any reason.
+    """
+    try:
+        from app.core.settings import load_selection_direct_pick
+        return load_selection_direct_pick()
+    except Exception:
+        return False
+
+
 class DragClickResolver:
     """Press-time selection + group tagging. See module docstring."""
 
@@ -405,6 +431,11 @@ class DragClickResolver:
         chain.reverse()  # [outermost unlocked, ..., clicked-if-unlocked]
         if not chain:
             return None
+        if direct_pick_enabled():
+            # "Direct pick" preference (Settings → Selection): a fresh
+            # click lands on the widget under the cursor instead of its
+            # outermost unlocked ancestor.
+            return fresh_click_target(chain, True).id
         now_ms = int(ws.tk.call("clock", "milliseconds"))
         same_leaf = clicked_nid == ctl._last_click_leaf_id
         within_window = (now_ms - ctl._last_click_time_ms) <= ctl._DRILL_WINDOW_MS

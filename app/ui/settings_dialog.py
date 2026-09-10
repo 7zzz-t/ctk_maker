@@ -85,6 +85,7 @@ KEY_PREVIEW_FLOATER = "preview_show_floater"
 KEY_PREVIEW_CONSOLE = "preview_show_console"
 KEY_PREVIEW_CONSOLE_MODE = "preview_console_mode"
 KEY_LANGUAGE = "language"
+KEY_SELECTION_DIRECT_PICK = "selection_direct_pick"
 
 CONSOLE_MODE_OFF = "off"
 CONSOLE_MODE_WINDOWS = "windows"
@@ -221,6 +222,7 @@ class SettingsDialog(ManagedToplevel):
             ("preview", tr("settings.tab.preview", "Preview"), self._build_preview),
             ("defaults", tr("settings.tab.defaults", "Defaults"), self._build_defaults),
             ("editor", tr("settings.tab.editor", "Editor"), self._build_editor),
+            ("selection", tr("settings.tab.selection", "Selection"), self._build_selection),
             ("autosave", tr("settings.tab.autosave", "Autosave"), self._build_autosave),
             ("notifications", tr("settings.tab.notifications", "Notifications"), self._build_notifications),
             ("appearance", tr("settings.tab.appearance", "Appearance"), self._build_appearance),
@@ -876,6 +878,49 @@ class SettingsDialog(ManagedToplevel):
 
     # ----- Preview tab -----
 
+    # ----- Selection tab -----
+
+    def _build_selection(self, parent: tk.Misc) -> tk.Frame:
+        """Canvas click-selection preference. Stock behaviour selects
+        the outermost unlocked container on a fresh click; "direct pick"
+        selects the widget under the cursor instead."""
+        tab = self._tab_frame(parent)
+        self._section_label(
+            tab,
+            tr("settings.section.selection", "Canvas click selection"),
+        ).pack(anchor="w")
+
+        self._selection_direct_pick_var = tk.BooleanVar(
+            value=bool(self._initial.get(KEY_SELECTION_DIRECT_PICK, False)),
+        )
+        cb_row = stk.Frame(tab, bg=BG)
+        cb_row.pack(fill="x", pady=(6, 2))
+        ctk.CTkCheckBox(
+            cb_row,
+            text=tr(
+                "settings.selection.direct_pick",
+                "Click selects the innermost widget (off: outermost container first)",
+            ),
+            variable=self._selection_direct_pick_var,
+            checkbox_width=16, checkbox_height=16,
+            font=ui_font(11),
+            fg_color=style.PRIMARY_BG, hover_color=style.PRIMARY_HOVER,
+        ).pack(anchor="w")
+
+        self._hint(
+            tab,
+            tr(
+                "settings.selection.hint",
+                "Off (default): clicking a widget nested inside a container "
+                "selects the outermost unlocked container — click the same "
+                "spot again within 800 ms to drill one level deeper, which "
+                "keeps container dragging easy. On: a click always selects "
+                "the widget directly under the cursor; drag a container by "
+                "selecting it in the Object Tree first.",
+            ),
+        ).pack(anchor="w", pady=(10, 0))
+        return tab
+
     def _build_preview(self, parent: tk.Misc) -> tk.Frame:
         tab = self._tab_frame(parent)
         self._section_label(tab, tr("settings.section.preview", "F5 preview window")).pack(anchor="w")
@@ -1093,6 +1138,10 @@ class SettingsDialog(ManagedToplevel):
             save_setting(KEY_EDITOR_COMMAND, "")
             save_setting(KEY_EDITOR_PATH, self._editor_path_var.get().strip())
         save_setting(KEY_PREVIEW_FLOATER, bool(self._preview_floater_var.get()))
+        save_setting(
+            KEY_SELECTION_DIRECT_PICK,
+            bool(self._selection_direct_pick_var.get()),
+        )
         mode = self._preview_console_mode_var.get()
         if mode not in (CONSOLE_MODE_OFF, CONSOLE_MODE_WINDOWS, CONSOLE_MODE_INAPP):
             mode = CONSOLE_MODE_OFF
