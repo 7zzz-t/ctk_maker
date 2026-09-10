@@ -54,11 +54,17 @@ def test_place_child_gets_no_main_axis():
 
 def test_param_set_get_roundtrip():
     node = _widget("CTkFrame", height=150)
-    assert ep.param_set(node, "x.main_axis", ep.M_CONTENT) is True
-    assert ep.param_get(node, "x.main_axis") == ep.M_CONTENT
-    assert node.extra == {"main_axis": {"mode": "content"}}
+    assert ep.param_set(node, "x.main_axis", ep.M_FIXED) is True
+    assert ep.param_get(node, "x.main_axis") == ep.M_FIXED
+    assert node.extra == {"main_axis": {"mode": "fixed"}}
+    # Legacy "content" spelling reads back as fixed, and a write
+    # normalizes it to the canonical "fixed".
+    node.extra = {"main_axis": {"mode": "content"}}
+    assert ep.main_axis_mode(node) == ep.M_FIXED
+    assert ep.param_set(node, "x.main_axis", ep.M_FIXED) is True
+    assert node.extra == {"main_axis": {"mode": "fixed"}}
     # Setting the same value again reports no change.
-    assert ep.param_set(node, "x.main_axis", ep.M_CONTENT) is False
+    assert ep.param_set(node, "x.main_axis", ep.M_FIXED) is False
 
 
 def test_nested_percent_param():
@@ -119,46 +125,64 @@ def test_percent_px_rounds_against_fixed_parent():
     assert ep.percent_px(content, 200) is None
 
 
-def test_stock_stretch_snapshot_rules():
+def test_derived_axis_px_rules():
     parent = _frame_parent("vbox", height=200)
     percent_child = _widget("CTkButton", parent=parent)
     ep.param_set(percent_child, "x.main_axis", ep.M_PERCENT)
-    assert ep.stock_stretch_snapshot(percent_child) == "grow"
-    remain_child = _widget("CTkButton", parent=parent)
-    ep.param_set(remain_child, "x.main_axis", ep.M_REMAIN)
-    assert ep.stock_stretch_snapshot(remain_child) == "grow"
-    # Free-axis parent → no snapshot override (child keeps its stretch).
+    ep.param_set(percent_child, "x.main_axis.percent", 25)
+    assert ep.derived_axis_px(percent_child, ep.MAIN) == 50
+    # Free-axis parent → no derivation (degrades to the child's own row).
     sf = WidgetNode("CTkScrollableFrame", properties={
         "layout_type": "vbox", "height": 520,
     })
     sf_child = _widget("CTkButton", parent=sf)
     ep.param_set(sf_child, "x.main_axis", ep.M_PERCENT)
-    assert ep.stock_stretch_snapshot(sf_child) is None
+    assert ep.derived_axis_px(sf_child, ep.MAIN) is None
+    # A fixed child is never derived.
     content_child = _widget("CTkButton", parent=parent)
-    assert ep.stock_stretch_snapshot(content_child) is None
+    assert ep.derived_axis_px(content_child, ep.MAIN) is None
 
 
-def test_sync_stock_snapshot_writes_grow_and_reports_changes():
-    parent = _frame_parent("vbox", height=200)
+def test_cross_axis_percent_derivation():
+    parent = _frame_parent("vbox", height=200)   # cross axis = width 200
     child = _widget("CTkButton", parent=parent)
-    ep.param_set(child, "x.main_axis", ep.M_PERCENT)
-    changes = ep.sync_stock_snapshot(child)
-    assert changes == {"stretch": (None, "grow")}
-    assert child.properties["stretch"] == "grow"
-    # Idempotent — second sync reports no change.
-    assert ep.sync_stock_snapshot(child) == {}
+    ep.param_set(child, "x.cross_axis", ep.C_PERCENT)
+    ep.param_set(child, "x.cross_axis.percent", 80)
+    assert ep.derived_axis_px(child, ep.CROSS) == 160
+    # Cross axis has no "remain" mode — an unknown value falls back.
+    child.extra = {"cross_axis": {"mode": "remain"}}
+    assert ep.axis_mode(child, ep.CROSS) == ep.C_FIXED
 
 
-def test_sync_remain_on_fixed_parent_and_content_preserves_stretch():
+def test_sync_sizes_writes_derived_px_not_stretch():
     parent = _frame_parent("vbox", height=200)
-    remain = _widget("CTkButton", parent=parent)
-    ep.param_set(remain, "x.main_axis", ep.M_REMAIN)
-    assert ep.sync_stock_snapshot(remain)["stretch"][1] == "grow"
-    # content mode never overrides a user-chosen stretch.
-    fixed = _widget("CTkButton", parent=parent, stretch="fixed")
-    ep.param_set(fixed, "x.main_axis", ep.M_CONTENT)
-    assert ep.sync_stock_snapshot(fixed) == {}
-    assert fixed.properties["stretch"] == "fixed"
+    child = _widget("CTkButton", parent=parent, height=10, stretch="fixed")
+    ep.param_set(child, "x.main_axis", ep.M_PERCENT)
+    ep.param_set(child, "x.main_axis.percent", 40)
+    changes = ep.sync_sizes(child)
+    assert changes == {"height": (10, 80)}
+    assert child.properties["height"] == 80
+    assert child.properties["stretch"] == "fixed"   # never touched
+    # Idempotent — second sync reports no change.
+    assert ep.sync_sizes(child) == {}
+
+
+def test_sync_remain_on_fixed_parent_splits_leftover():
+    parent = _frame_parent("vbox", height=200)
+    a = _widget("CTkButton", parent=parent, height=10)
+    b = _widget("CTkButton", parent=parent, height=10)
+    for n in (a, b):
+        ep.param_set(n, "x.main_axis", ep.M_REMAIN)
+    ep.sync_sizes(a)
+    ep.sync_sizes(b)
+    # Fixed total 0, spacing 0 → the two remainders split 200 → 100 each.
+    assert a.properties["height"] == 100
+    assert b.properties["height"] == 100
+    # A fixed child never gets a derived size backfilled.
+    fixed = _widget("CTkButton", parent=parent, height=10)
+    ep.param_set(fixed, "x.main_axis", ep.M_FIXED)
+    assert ep.sync_sizes(fixed) == {}
+    assert fixed.properties["height"] == 10
 
 
 def test_sync_free_parent_leaves_stretch_untouched():

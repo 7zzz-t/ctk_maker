@@ -161,17 +161,22 @@ class SchemaMixin:
     # ------------------------------------------------------------------
     def _extra_rows_visible(self, node) -> list:
         from app.widgets.extra_params import (
+            AXIS_KEY,
+            axis_mode,
             extra_rows_for,
-            main_axis_mode,
         )
         rows = []
         for row in extra_rows_for(node):
-            if row.get("type") == "number":
-                # The percent value row shows only while the mode is
-                # percent (spec §11 main_axis).
-                if main_axis_mode(node) == "percent":
-                    rows.append(row)
-            else:
+            cond = row.get("extra_visible_when") or {}
+            visible = True
+            for axis_key, want in cond.items():
+                axis = next(
+                    (a for a, k in AXIS_KEY.items() if k == axis_key), None,
+                )
+                if axis is None or axis_mode(node, axis) != want:
+                    visible = False
+                    break
+            if visible:
                 rows.append(row)
         return rows
 

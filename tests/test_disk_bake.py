@@ -1,14 +1,16 @@
-"""Disk bake (spec §11.5): percent / remainder children serialize as
-stock 00 parameters — stretch=fill + exact main-axis px — so stock 00
-renders the layout pixel-identical to the 02 canvas. In-memory extra
-keeps the responsive semantics.
+"""Disk bake (spec §11.5): derived size params (main-axis percent /
+remainder, cross-axis percent) serialize as a plain number in the
+child's own ``height`` / ``width`` — exactly what a user would type by
+hand. ``stretch`` is left as the user set it, so stock 00 renders the
+layout identically.
 
 Acceptance:
 - single remainder on a 300px vbox with fixed(50)+percent40%(120) →
-  stretch=fill, height=130
-- three remainders on 300px → each 100, fill
+  height=130
+- three remainders on 300px → each 100
 - hbox bakes width
-- scroll-content and auto-height parents are NOT baked
+- cross-axis percent bakes the cross row
+- scroll-content parents are NOT baked
 - to_dict is idempotent across a from_dict round-trip
 - in-memory nodes keep their own height / stretch (no mutation)
 """
@@ -45,7 +47,7 @@ def _percent(pct):
     return _child(extra={"main_axis": {"mode": "percent", "percent": pct}})
 
 
-def test_remain_bakes_to_fill_with_leftover_px():
+def test_remain_bakes_leftover_px():
     parent = _vbox([
         _child(height=50),          # fixed
         _percent(40),               # 120 px
@@ -56,11 +58,12 @@ def test_remain_bakes_to_fill_with_leftover_px():
                        if "remain" in str(c.get("_ctkmaker_meta")))
     # avail = 300 - 50 - 120 = 130 → the single remainder row.
     assert remain_disk["properties"]["height"] == 130
-    assert remain_disk["properties"]["stretch"] == "fill"
+    # The bake writes a plain number — never ``stretch``.
+    assert "stretch" not in remain_disk["properties"]
     pct_disk = next(c for c in disk["children"]
                     if "percent" in str(c.get("_ctkmaker_meta")))
     assert pct_disk["properties"]["height"] == 120
-    assert pct_disk["properties"]["stretch"] == "fill"
+    assert "stretch" not in pct_disk["properties"]
     # In-memory nodes untouched.
     remain_node = next(c for c in parent.children
                        if c.extra.get("main_axis", {}).get("mode") == "remain")
@@ -75,7 +78,23 @@ def test_multiple_remainders_split_the_leftover():
     assert len(remains) == 3
     for rd in remains:
         assert rd["properties"]["height"] == 100
-        assert rd["properties"]["stretch"] == "fill"
+        assert "stretch" not in rd["properties"]
+
+
+def test_cross_axis_percent_bakes_cross_row():
+    parent = WidgetNode("CTkFrame", properties={
+        "width": 400, "height": 100,
+        "layout_type": "vbox", "layout_spacing": 0,
+    })
+    child = _child(height=30, extra={
+        "cross_axis": {"mode": "percent", "percent": 50},
+    })
+    child.parent = parent
+    parent.children.append(child)
+    child_disk = parent.to_dict()["children"][0]
+    # vbox cross axis = width → 50% of 400.
+    assert child_disk["properties"]["width"] == 200
+    assert "stretch" not in child_disk["properties"]
 
 
 def test_hbox_bakes_width():
@@ -89,7 +108,7 @@ def test_hbox_bakes_width():
     disk = parent.to_dict()
     child_disk = disk["children"][0]
     assert child_disk["properties"]["width"] == 100
-    assert child_disk["properties"]["stretch"] == "fill"
+    assert "stretch" not in child_disk["properties"]
 
 
 def test_no_bake_for_scroll_parent():

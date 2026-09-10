@@ -17,93 +17,37 @@ _CTKMETA_KEY = "_ctkmaker_meta"
 
 
 def _bake_pack_child_disk(container, child, child_dict):
-    """Spec §11.5 disk bake: percent / remainder children of a
-    fixed-axis pack container serialize as stock 00 parameters —
-    ``stretch="fill"`` (cross axis stretches, main axis pinned) plus the
-    exact main-axis px — so stock 00 renders the layout pixel-identical
-    to the 02 canvas. The in-memory ``extra`` keeps the responsive
-    semantics (02 preview and the exported .py still re-derive grow /
-    px at runtime). Returns ``child_dict`` (possibly rewritten)."""
+    """Spec §11.5 disk bake: derived size params (main-axis percent /
+    remainder, cross-axis percent) serialize as a **plain number** in
+    the child's own ``height`` / ``width`` row — exactly what a user
+    would have typed by hand. ``stretch`` is deliberately left as the
+    user set it (default ``fixed``), so stock 00 opens the same file and
+    renders the layout identically. Returns ``child_dict`` (possibly
+    rewritten)."""
     if child is None or not isinstance(child_dict, dict):
         return child_dict
-    parent_props = (container.properties or {}) if container is not None else {}
-    layout = parent_props.get("layout_type")
-    axis = None
-    if layout == "vbox":
-        axis = "height"
-    elif layout == "hbox":
-        axis = "width"
-    if axis is None:
-        return child_dict
-    try:
-        parent_px = int(parent_props.get(axis, 0) or 0)
-    except (TypeError, ValueError):
-        return child_dict
-    if parent_px <= 0:
-        return child_dict
-    if getattr(container, "widget_type", "") == "CTkScrollableFrame":
-        return child_dict
-    try:
-        if int(parent_props.get("height", 0) or 0) <= 0:
-            return child_dict
-    except (TypeError, ValueError):
-        return child_dict
-
-    child_extra = child.extra or {}
-    bucket = child_extra.get("main_axis")
-    mode = (bucket or {}).get("mode") if isinstance(bucket, dict) else None
-    if mode not in ("percent", "remain"):
-        return child_dict
-
-    def _sib_mode(sib):
-        b = (sib.extra or {}).get("main_axis")
-        m = (b or {}).get("mode") if isinstance(b, dict) else None
-        if m == "percent":
-            return "percent"
-        if m == "remain":
-            return "grow"  # remainder children share the grow pool
-        return "grow" if str(sib.properties.get("stretch", "")) == "grow" \
-            else "fixed"
-
-    def _pct_px(sib, p_px):
-        b = (sib.extra or {}).get("main_axis")
-        try:
-            pct = int((b or {}).get("percent", 50))
-        except (TypeError, ValueError):
-            pct = 50
-        pct = max(1, min(100, pct))
-        return max(1, round(p_px * pct / 100))
-
-    siblings = list(getattr(container, "children", None) or [])
-    try:
-        spacing = int(parent_props.get("layout_spacing", 0) or 0)
-    except (TypeError, ValueError):
-        spacing = 0
-    fixed_total = 0
-    grow_count = 0
-    for sib in siblings:
-        m = _sib_mode(sib)
-        if m == "percent":
-            fixed_total += _pct_px(sib, parent_px)
-        elif m == "grow":
-            grow_count += 1
-        else:
-            try:
-                fixed_total += max(0, int(sib.properties.get(axis, 0) or 0))
-            except (TypeError, ValueError):
-                pass
-
-    if mode == "percent":
-        baked_px = _pct_px(child, parent_px)
-    else:
-        spacing_total = spacing * max(0, len(siblings) - 1)
-        avail = max(0, parent_px - fixed_total - spacing_total)
-        baked_px = max(1, avail // max(1, grow_count))
-
+    # Imported lazily: ``extra_params`` refers back to this module.
+    from app.widgets.extra_params import (
+        CROSS,
+        MAIN,
+        derived_axis_px,
+        parent_axis_key,
+    )
+    layout = (container.properties or {}).get("layout_type") \
+        if container is not None else None
     props = dict(child_dict.get("properties") or {})
-    props[axis] = baked_px
-    props["stretch"] = "fill"
-    child_dict["properties"] = props
+    changed = False
+    for axis in (MAIN, CROSS):
+        px = derived_axis_px(child, axis)
+        if px is None:
+            continue
+        key = parent_axis_key(layout, axis)
+        if key is None or props.get(key) == px:
+            continue
+        props[key] = px
+        changed = True
+    if changed:
+        child_dict["properties"] = props
     return child_dict
 
 

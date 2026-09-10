@@ -2598,22 +2598,31 @@ def _scrollable_dropdown_lines(var_name: str, props: dict) -> list[str]:
 
 
 def _percent_axis_px(node, key: str):
-    """Main-axis px for a first-class percent child (spec §11), or None
-    when the child isn't percent / the parent's main axis is free
-    (scroll content, auto height) — percent then degrades to content."""
+    """Derived px for a first-class percent / remainder child (spec §11)
+    on the axis ``key`` belongs to (``height`` / ``width``), or None when
+    the child isn't derived on that axis / the parent's axis is free
+    (scroll content, auto) — percent then degrades to the child's own
+    stored size."""
     if node is None:
         return None
     from app.widgets.extra_params import (
-        main_axis_mode,
-        parent_main_axis,
-        parent_main_px,
-        percent_px,
+        CROSS,
+        MAIN,
+        M_PERCENT,
+        M_REMAIN,
+        axis_mode,
+        derived_axis_px,
+        parent_axis_key,
     )
-    if main_axis_mode(node) != "percent":
-        return None
-    if parent_main_axis(node) != key:
-        return None
-    return percent_px(node, parent_main_px(node))
+    layout = node.parent.properties.get("layout_type") \
+        if node.parent is not None else None
+    for axis in (MAIN, CROSS):
+        if parent_axis_key(layout, axis) != key:
+            continue
+        if axis_mode(node, axis) not in (M_PERCENT, M_REMAIN):
+            return None
+        return derived_axis_px(node, axis)
+    return None
 
 
 def _geometry_call(
@@ -2633,12 +2642,19 @@ def _geometry_call(
             ),
         )
         if node is not None:
-            from app.widgets.extra_params import main_axis_mode
-            if main_axis_mode(node) == "percent":
-                # Percent child: its main-axis size ships as the exact
-                # constructor height/width px, so pack must fill only the
-                # cross axis and never expand along the main axis.
-                stretch = "fill"
+            from app.widgets.extra_params import (
+                MAIN,
+                M_PERCENT,
+                M_REMAIN,
+                axis_mode,
+            )
+            if axis_mode(node, MAIN) in (M_PERCENT, M_REMAIN) \
+                    and stretch == "grow":
+                # A derived main-axis size ships as an exact constructor
+                # px — a stale ``grow`` must not re-expand it. Cross-axis
+                # behaviour is owned by the child's own ``stretch``
+                # (default ``fixed``) and is left untouched here.
+                stretch = "fixed"
         if stretch == "fill":
             cross = "y" if layout == "hbox" else "x"
             parts.append(f'fill="{cross}"')

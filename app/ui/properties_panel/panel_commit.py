@@ -867,9 +867,11 @@ class CommitMixin:
             self._commit_extra_param_batch(pname, value, batch)
             return
         from app.widgets.extra_params import (
+            AXIS_KEY,
+            axis_of_key,
             extra_key,
             param_set,
-            sync_stock_snapshot,
+            sync_sizes,
         )
         key = extra_key(pname)
         if key is None:
@@ -881,16 +883,19 @@ class CommitMixin:
         if not param_set(node, pname, value):
             return
         after = dict(node.extra or {})
+        axis = axis_of_key(key)
         prop_changes: dict = {}
-        if key == "main_axis" or key.startswith("main_axis."):
-            prop_changes = sync_stock_snapshot(node)
+        if axis is not None:
+            # Derived px is a plain number in the child's own size row;
+            # sync it so the canvas / listeners see the new value.
+            prop_changes = sync_sizes(node)
             for name, (_before, snap_value) in prop_changes.items():
                 if snap_value is not None:
                     self.project.event_bus.publish(
                         "property_changed", self.current_id, name,
                         snap_value,
                     )
-        if key == "main_axis":
+        if axis is not None and key == AXIS_KEY[axis]:
             # Mode switch changes which extra rows are visible (the
             # percent value row) — rebuild the whole panel.
             self._rebuild()
@@ -906,16 +911,20 @@ class CommitMixin:
 
     def _commit_extra_param_batch(self, pname: str, value, batch_ids) -> None:
         """Multi-select x. commit (spec §11): fan the param out to every
-        widget in the batch (same widget_type), sync each widget's stock
-        snapshot, and record ONE undo step (MultiExtraParamCommand)."""
+        widget in the batch (same widget_type), sync each widget's
+        derived size rows, and record ONE undo step
+        (MultiExtraParamCommand)."""
         from app.widgets.extra_params import (
+            AXIS_KEY,
+            axis_of_key,
             extra_key,
             param_set,
-            sync_stock_snapshot,
+            sync_sizes,
         )
         key = extra_key(pname)
         if key is None:
             return
+        axis = axis_of_key(key)
         entries: list = []
         for wid in batch_ids:
             node = self.project.get_widget(wid)
@@ -926,15 +935,15 @@ class CommitMixin:
                 continue
             after = dict(node.extra or {})
             prop_changes: dict = {}
-            if key == "main_axis" or key.startswith("main_axis."):
-                prop_changes = sync_stock_snapshot(node)
+            if axis is not None:
+                prop_changes = sync_sizes(node)
                 for name, (_before, snap_value) in prop_changes.items():
                     if snap_value is not None:
                         self.project.event_bus.publish(
                             "property_changed", wid, name, snap_value,
                         )
             entries.append((wid, before, after, prop_changes))
-        if key == "main_axis":
+        if axis is not None and key == AXIS_KEY[axis]:
             # Mode switch changes which extra rows exist (percent value
             # row) — rebuild so the panel matches every batch node.
             self._rebuild()

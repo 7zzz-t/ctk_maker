@@ -68,7 +68,10 @@ def test_scroll_content_percent_degrades_to_stored_size():
     assert "height=30" in code
 
 
-def test_remain_child_keeps_grow_path():
+def test_remain_child_exports_exact_px():
     parent = _frame(layout_type="vbox", width=300, height=300)
     code = _project_with(parent, [_percent_child(mode="remain")])
-    assert "expand=True" in code
+    # The single remainder takes the whole main axis as an exact px —
+    # no grow/expand path any more.
+    assert "height=300" in code
+    assert "expand=True" not in code

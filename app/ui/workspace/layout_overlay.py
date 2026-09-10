@@ -683,6 +683,31 @@ class LayoutOverlayManager:
             except tk.TclError:
                 pass
 
+        # Cross-axis percent (spec §11): the derived cross px is a plain
+        # number on the child's own cross row — mirror it on the canvas
+        # so the drawing matches what save/export will bake.
+        from app.widgets.extra_params import (
+            CROSS,
+            container_axis_plan,
+        )
+        cross_plan = container_axis_plan(parent_node, CROSS)
+        if cross_plan:
+            cross_key = "width" if axis_key == "height" else "height"
+            for sibling in all_siblings:
+                px = cross_plan.get(sibling.id)
+                if not px or px <= 0:
+                    continue
+                entry = widget_views.get(sibling.id)
+                if entry is None:
+                    continue
+                widget, _ = entry
+                sib_anchor = anchor_views.get(sibling.id, widget)
+                target = max(1, int(px * zoom))
+                try:
+                    sib_anchor.configure(**{cross_key: target})
+                except tk.TclError:
+                    pass
+
     def _resize_image_if_needed(
         self, sibling, widget, axis_key, target_main, zoom,
     ) -> None:
