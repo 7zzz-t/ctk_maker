@@ -9,6 +9,7 @@ that, per node, idempotently.
 from app.core.widget_node import WidgetNode
 from app.widgets.extra_params import (
     CROSS_AXIS,
+    CROSS_PERCENT,
     C_PERCENT,
     MAIN_AXIS,
     MAIN_PERCENT,
@@ -145,3 +146,36 @@ def test_fixed_axes_keep_both_size_rows_editable():
     param_set(a, ui_name(MAIN_AXIS), M_FIXED)
     disabled = managed_geometry_disabled(a)
     assert disabled == frozenset({"x", "y"})             # both rows editable
+
+
+def _scroll(properties):
+    return WidgetNode(
+        widget_type="CTkScrollableFrame", properties=dict(properties),
+    )
+
+
+def test_scrollable_parent_distributes_the_cross_axis():
+    """Reported bug: changing a scrollable container's own cross
+    percentage resized the container but left every descendant stale —
+    the plan bailed out for *any* axis on a CTkScrollableFrame."""
+    root = _scroll({"layout_type": "vbox", "width": 1000, "height": 400})
+    a = _frame({"width": 500})
+    b = _frame({"width": 250})
+    _attach(root, a)
+    _attach(a, b)
+    for node in (a, b):
+        assert param_set(node, ui_name(CROSS_AXIS), C_PERCENT)
+        assert param_set(node, ui_name(f"{CROSS_AXIS}.{CROSS_PERCENT}"), 50)
+
+    sync_sizes_cascade(a)
+    assert a.properties["width"] == 500      # 50% of the 1000 viewport
+    assert b.properties["width"] == 250      # 50% of a — the 2nd level
+
+
+def test_scrollable_parent_keeps_the_main_axis_content_sized():
+    root = _scroll({"layout_type": "vbox", "width": 1000, "height": 400})
+    a = _frame({"height": 100})
+    _attach(root, a)
+    _half_of_parent(a)                       # main axis -> percent
+    sync_sizes_cascade(a)
+    assert a.properties["height"] == 100     # content-sized: untouched

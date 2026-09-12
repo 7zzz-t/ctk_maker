@@ -237,8 +237,14 @@ def parent_axis_px(node, axis: str) -> int | None:
     if node is None or node.parent is None:
         return None
     parent = node.parent
-    if getattr(parent, "widget_type", "") == "CTkScrollableFrame":
+    if (
+        axis == MAIN
+        and getattr(parent, "widget_type", "") == "CTkScrollableFrame"
+    ):
+        # Only the scrolling (main) axis is content-sized; the cross
+    # axis has a real viewport size and still distributes.
         return None
+    # has a real viewport size, so it still distributes as usual.
     key = parent_axis_key(parent.properties.get("layout_type"), axis)
     if key is None:
         return None
@@ -260,8 +266,14 @@ def container_axis_plan(container, axis: str) -> dict:
     plan: dict = {}
     if container is None:
         return plan
-    if getattr(container, "widget_type", "") == "CTkScrollableFrame":
+    if (
+        axis == MAIN
+        and getattr(container, "widget_type", "") == "CTkScrollableFrame"
+    ):
+        # Scrollable content is content-sized along the scrolling
+    # (main) axis only; the cross axis still has a viewport.
         return plan
+    # axis only — the cross axis still has a viewport to share.
     layout = container.properties.get("layout_type")
     key = parent_axis_key(layout, axis)
     if key is None:
