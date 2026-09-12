@@ -233,14 +233,15 @@ class SchemaMixin:
                 )
 
     def _add_extra_number_editor(self, iid: str, pname: str) -> None:
-        """✎ chip for an x. number row — opens the inline prompt."""
+        """✎ chip for an x. number row — opens the inline cell editor."""
         edit_btn = tk.Label(
             self.tree, text="✎", bg=TREE_BG, fg="#aaaaaa",
             font=ui_font(11, "bold"), cursor="hand2", borderwidth=0,
         )
         edit_btn.bind(
             "<Button-1>",
-            lambda _e, p=pname: self._prompt_extra_number(p),
+            lambda _e, p=pname, i=iid:
+                self._open_extra_number_overlay(p, i),
         )
         self.overlays.add(iid, SLOT_ENUM_BUTTON, edit_btn, place_enum_button)
 

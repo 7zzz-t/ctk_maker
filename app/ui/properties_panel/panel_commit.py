@@ -290,6 +290,13 @@ class CommitMixin:
             return
         prop = self._find_prop_by_name(pname)
         if prop is None:
+            # Axis rows (``x.Main Axis.percent``) live in ``node.extra``
+            # rather than the descriptor, so the editor registry cannot
+            # find them — they still get the same inline cell editor as
+            # x/y/w/h instead of the old pop-up prompt.
+            if self._is_extra_number_row(pname):
+                self._open_extra_number_overlay(pname, iid)
+                return "break"
             return
         get_editor(prop["type"]).on_single_click(self, pname, prop)
 
@@ -350,6 +357,85 @@ class CommitMixin:
     # ------------------------------------------------------------------
     # Editors — inline Entry
     # ------------------------------------------------------------------
+    def _is_extra_number_row(self, pname: str) -> bool:
+        """True when ``pname`` names an axis number row (percent) for the
+        current node — those are backed by ``node.extra``, not by the
+        descriptor's properties."""
+        if not str(pname).startswith("x."):
+            return False
+        node = (
+            self.project.get_widget(self.current_id)
+            if self.current_id else None
+        )
+        if node is None:
+            return False
+        from app.widgets.extra_params import extra_rows_for
+        return any(
+            prop.get("name") == pname and prop.get("type") == "number"
+            for prop in extra_rows_for(node)
+        )
+
+    def _open_extra_number_overlay(
+        self, pname: str, iid: str | None = None,
+    ) -> None:
+        """Inline Entry for an axis number row — same widget, same commit
+        path and same feel as the x/y/w/h editor (the value is clamped to
+        the 1-100 range the row advertises)."""
+        if self.current_id is None:
+            return
+        node = self.project.get_widget(self.current_id)
+        if node is None:
+            return
+        if iid is None:
+            iid = self._prop_iids.get(pname, f"p:{pname}")
+        try:
+            bbox = self.tree.bbox(iid, "#1")
+        except tk.TclError:
+            bbox = None
+        if not bbox:
+            return
+        from app.widgets.extra_params import param_get
+        current = param_get(node, pname, default=50)
+        entry = tk.Entry(
+            self.tree,
+            font=ui_font(11),
+            bg=VALUE_BG, fg="#cccccc", insertbackground="#cccccc",
+            bd=1, relief="flat",
+            highlightthickness=1, highlightbackground="#3a3a3a",
+            highlightcolor="#3b8ed0",
+        )
+        entry.insert(0, "" if current is None else str(current))
+        entry.place(
+            x=bbox[0], y=bbox[1], width=bbox[2], height=bbox[3],
+        )
+        entry.select_range(0, tk.END)
+        entry.focus_set()
+        self._active_editor = entry
+        self._active_prop = pname
+        self._active_prop_type = "number"
+
+        def _commit(_event=None) -> None:
+            if self._active_editor is not entry:
+                return
+            try:
+                raw = entry.get()
+            except tk.TclError:
+                raw = ""
+            self._cancel_active_editor()
+            raw = raw.strip()
+            if not raw:
+                return
+            try:
+                parsed = int(float(raw))
+            except (TypeError, ValueError):
+                return
+            self._commit_prop(pname, max(1, min(100, parsed)))
+
+        entry.bind("<Return>", lambda _e: _commit())
+        entry.bind("<FocusOut>", lambda _e: _commit())
+        entry.bind("<Escape>", lambda _e: self._cancel_active_editor())
+
+
     def _open_entry_overlay(
         self, iid: str, pname: str, prop: dict, bbox,
     ) -> None:
