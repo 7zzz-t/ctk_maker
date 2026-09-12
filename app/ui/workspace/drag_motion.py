@@ -414,9 +414,18 @@ class DragMotion:
                 # and lands the widget at raw tk pixels while the
                 # initial ``_place_nested`` call routed through CTk's
                 # scaling, causing a cross-DPI jump on first drag tick.
+                # Composite widgets (CTkScrollableFrame) are represented
+                # by their inner ``_parent_frame`` anchor — the outer
+                # widget is not managed by the parent's geometry manager,
+                # so placing it is a silent no-op and the drag looked
+                # frozen. Move the anchor when there is one.
+                anchor_map = getattr(
+                    getattr(ctl, "workspace", None), "_anchor_views", None,
+                ) or {}
+                target = anchor_map.get(wid, w_widget)
                 try:
-                    if w_widget.winfo_manager() == "place":
-                        w_widget.place(
+                    if target.winfo_manager() == "place":
+                        target.place(
                             x=int(new_x * place_scale),
                             y=int(new_y * place_scale),
                         )
