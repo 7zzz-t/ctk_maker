@@ -321,15 +321,23 @@ class PropertyRouter:
                     x, y, document=owning_doc,
                 )
                 ws.canvas.coords(window_id, cx, cy)
-            elif widget.winfo_manager() == "place":
-                # ``.place`` (not ``.place_configure``) routes through
-                # CTk's DPI-scaling wrapper — see drag.py for the full
-                # rationale. Using ``place_configure`` here would jump
-                # the widget back to raw tk pixels after a drag.
-                widget.place(
-                    x=int(x * ws.zoom.value),
-                    y=int(y * ws.zoom.value),
-                )
+            else:
+                # Composite widgets (CTkScrollableFrame) are represented on
+                # the canvas by their inner ``_parent_frame`` anchor: the
+                # outer widget is not managed by the parent geometry manager,
+                # so placing *it* is a silent no-op and x/y edits + drags
+                # looked frozen (only width/height, synced onto the anchor
+                # by ``sync_composite_size``, took effect).
+                target = ws._anchor_views.get(widget_id, widget)
+                if target.winfo_manager() == "place":
+                    # ``.place`` (not ``.place_configure``) routes through
+                    # CTk's DPI-scaling wrapper — see drag.py for the full
+                    # rationale. Using ``place_configure`` here would jump
+                    # the widget back to raw tk pixels after a drag.
+                    target.place(
+                        x=int(x * ws.zoom.value),
+                        y=int(y * ws.zoom.value),
+                    )
         except Exception:
             log_error("workspace._on_property_changed x/y coords")
         if widget_id == ws.project.selected_id:
