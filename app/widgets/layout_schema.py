@@ -286,6 +286,27 @@ def managed_geometry_disabled(node) -> frozenset[str]:
         )
     except (TypeError, ValueError):
         parent_main = 0
+    # 02 axis params take over from the legacy ``stretch`` flags:
+    # the axis mode decides which size field the layout owns.
+    # ``fixed`` means the user's own row wins — editable, and the
+    # axis cascade then re-derives the descendants from it — while
+    # ``percent`` / ``remain`` take the value from the parent.
+    extra = getattr(node, "extra", None) or {}
+    if "main_axis" in extra or "cross_axis" in extra:
+        from app.widgets.extra_params import (
+            CROSS,
+            MAIN,
+            M_FIXED,
+            axis_mode,
+        )
+        for _axis, _field in ((MAIN, main_axis), (CROSS, cross_axis)):
+            if is_scroll_content and _axis == MAIN:
+                # Content-sized parent: percent/remain degrade to the
+                # child's own row, so the field stays editable.
+                continue
+            if axis_mode(node, _axis, M_FIXED) != M_FIXED:
+                disabled.add(_field)
+        return frozenset(disabled)
     if stretch == "grow":
         if parent_main > 0:
             disabled.add(main_axis)
