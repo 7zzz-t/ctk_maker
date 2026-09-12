@@ -938,6 +938,33 @@ class CommitMixin:
             MultiChangePropertyCommand(self.current_id, changed),
         )
 
+    def _publish_size_changes(self, widget_id: str, changes: dict) -> None:
+        """Tell the canvas a baked size row moved on ``widget_id``."""
+        for name, (_before, value) in (changes or {}).items():
+            if value is not None:
+                self.project.event_bus.publish(
+                    "property_changed", widget_id, name, value,
+                )
+
+    def _cascade_extra_entries(self, node, cascade: dict) -> list:
+        """Undo entries for the descendants whose baked size rows the
+        cascade moved. Their ``extra`` dicts are untouched, so the entry
+        only has to replay the stock-field snapshots."""
+        out: list = []
+        for wid, changes in (cascade or {}).items():
+            if node is not None and wid == node.id:
+                continue
+            if not changes:
+                continue
+            child = self.project.get_widget(wid)
+            if child is None:
+                continue
+            snap = dict(child.extra or {})
+            out.append((wid, snap, snap, dict(changes)))
+            self._publish_size_changes(wid, changes)
+        return out
+
+
     def _commit_extra_param(self, pname: str, value) -> None:
         """Commit an x.-prefixed enhancement param: write it onto
         ``WidgetNode.extra`` and record one undo step. Never touches
@@ -958,6 +985,7 @@ class CommitMixin:
             extra_key,
             param_set,
             sync_sizes,
+            sync_sizes_cascade,
         )
         key = extra_key(pname)
         if key is None:
@@ -970,11 +998,13 @@ class CommitMixin:
             return
         after = dict(node.extra or {})
         axis = axis_of_key(key)
+        _cascade: dict = {}
         prop_changes: dict = {}
         if axis is not None:
             # Derived px is a plain number in the child's own size row;
             # sync it so the canvas / listeners see the new value.
-            prop_changes = sync_sizes(node)
+            _cascade = sync_sizes_cascade(node)
+            prop_changes = _cascade.get(node.id, {})
             for name, (_before, snap_value) in prop_changes.items():
                 if snap_value is not None:
                     self.project.event_bus.publish(
@@ -989,11 +1019,16 @@ class CommitMixin:
             self._refresh_extra_row(pname)
         if getattr(self, "_suspend_history", False):
             return
-        self.project.history.push(
-            ExtraParamCommand(
-                self.current_id, before, after, prop_changes,
-            ),
-        )
+        entries: list = [(self.current_id, before, after, prop_changes)]
+        entries.extend(self._cascade_extra_entries(node, _cascade))
+        if len(entries) == 1:
+            self.project.history.push(
+                ExtraParamCommand(
+                    self.current_id, before, after, prop_changes,
+                ),
+            )
+            return
+        self.project.history.push(MultiExtraParamCommand(entries))
 
     def _commit_extra_param_batch(self, pname: str, value, batch_ids) -> None:
         """Multi-select x. commit (spec §11): fan the param out to every
@@ -1006,11 +1041,13 @@ class CommitMixin:
             extra_key,
             param_set,
             sync_sizes,
+            sync_sizes_cascade,
         )
         key = extra_key(pname)
         if key is None:
             return
         axis = axis_of_key(key)
+        _cascade: dict = {}
         entries: list = []
         for wid in batch_ids:
             node = self.project.get_widget(wid)
@@ -1022,13 +1059,17 @@ class CommitMixin:
             after = dict(node.extra or {})
             prop_changes: dict = {}
             if axis is not None:
-                prop_changes = sync_sizes(node)
+                _cascade = sync_sizes_cascade(node)
+                prop_changes = _cascade.get(node.id, {})
                 for name, (_before, snap_value) in prop_changes.items():
                     if snap_value is not None:
                         self.project.event_bus.publish(
                             "property_changed", wid, name, snap_value,
                         )
             entries.append((wid, before, after, prop_changes))
+            entries.extend(
+                self._cascade_extra_entries(node, _cascade),
+            )
         if axis is not None and key == AXIS_KEY[axis]:
             # Mode switch changes which extra rows exist (percent value
             # row) — rebuild so the panel matches every batch node.

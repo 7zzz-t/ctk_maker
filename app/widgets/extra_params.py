@@ -357,6 +357,31 @@ def sync_sizes(node) -> dict:
 
 
 # ---------------------------------------------------------------------
+def sync_sizes_cascade(node, out: dict | None = None) -> dict:
+    """Bake derived sizes for ``node`` and every descendant, top-down.
+
+    The derived px of a child is computed from its parent's *current*
+    size, so a change high in the tree has to ripple down: refresh this
+    node's own rows first, then let each child re-derive from the updated
+    numbers, and so on. Returns ``{widget_id: {prop: (before, after)}}``
+    (grouped per node — the same prop name recurs across siblings, so a
+    flat dict would lose entries).
+
+    Idempotent (rows already holding the right value are left alone) and
+    it never writes ``stretch``.
+    """
+    result = {} if out is None else out
+    if node is None:
+        return result
+    changes = sync_sizes(node)
+    if changes:
+        result[node.id] = changes
+    for child in (getattr(node, "children", None) or []):
+        sync_sizes_cascade(child, result)
+    return result
+
+
+
 # compatibility wrappers (older call sites / tests)
 # ---------------------------------------------------------------------
 def main_axis_mode(node, default: str = M_FIXED) -> str:
