@@ -74,3 +74,37 @@ def test_cascade_leaves_stretch_alone():
     sync_sizes_cascade(a)
     assert a.properties["height"] == 150
     assert a.properties["stretch"] == "fill"
+
+
+class _FakeProject:
+    """Just enough Project for a command round-trip."""
+
+    def __init__(self, nodes):
+        self._nodes = {n.id: n for n in nodes}
+
+    def get_widget(self, widget_id):
+        return self._nodes.get(widget_id)
+
+    def update_property(self, widget_id, name, value):
+        node = self._nodes.get(widget_id)
+        if node is not None:
+            node.properties[name] = value
+
+    def select_widget(self, _widget_id):
+        pass
+
+
+def test_multi_node_property_command_round_trip():
+    from app.core.commands import MultiNodePropertyCommand
+
+    a = _frame({"height": 150})
+    b = _frame({"height": 75})
+    project = _FakeProject([a, b])
+    cmd = MultiNodePropertyCommand([
+        (a.id, {"height": (100, 150)}),
+        (b.id, {"height": (50, 75)}),
+    ])
+    cmd.undo(project)
+    assert (a.properties["height"], b.properties["height"]) == (100, 50)
+    cmd.redo(project)
+    assert (a.properties["height"], b.properties["height"]) == (150, 75)

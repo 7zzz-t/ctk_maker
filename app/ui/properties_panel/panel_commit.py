@@ -29,6 +29,7 @@ from app.core.commands import (
     ChangeVariableDefaultCommand,
     ExtraParamCommand,
     MultiChangePropertyCommand,
+    MultiNodePropertyCommand,
     MultiExtraParamCommand,
     MultiWidgetPropertyCommand,
 )
@@ -927,6 +928,25 @@ class CommitMixin:
             if before_snapshot.get(k) != after_snapshot.get(k)
         }
         if not changed:
+            return
+        # A container size edit re-bakes the axis-derived rows of its
+        # descendants (their px is a share of the container size) — and
+        # that has to ride the SAME undo step as the typed value.
+        cascade: dict = {}
+        if pname in ("width", "height"):
+            from app.widgets.extra_params import sync_sizes_cascade
+            for child in (node.children or []):
+                for _wid, _changes in sync_sizes_cascade(child).items():
+                    if not _changes:
+                        continue
+                    cascade.setdefault(_wid, {}).update(_changes)
+                    self._publish_size_changes(_wid, _changes)
+        if cascade:
+            self.project.history.push(
+                MultiNodePropertyCommand(
+                    [(self.current_id, changed), *cascade.items()],
+                ),
+            )
             return
         if len(changed) == 1:
             (k, (b, a)), = changed.items()

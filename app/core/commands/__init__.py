@@ -48,6 +48,7 @@ from app.core.commands.properties import (
     ChangePropertyCommand,
     ExtraParamCommand,
     MultiChangePropertyCommand,
+    MultiNodePropertyCommand,
     MultiExtraParamCommand,
     MultiWidgetPropertyCommand,
 )
@@ -93,6 +94,7 @@ __all__ = [
     "ChangePropertyCommand",
     "ChangeDescriptionCommand",
     "MultiChangePropertyCommand",
+    "MultiNodePropertyCommand",
     "MultiWidgetPropertyCommand",
     "ExtraParamCommand",
     "MultiExtraParamCommand",

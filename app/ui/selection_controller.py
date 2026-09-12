@@ -17,6 +17,7 @@ import tkinter as tk
 from typing import Callable
 
 from app.core.commands import ResizeCommand
+from app.core.commands import MultiNodePropertyCommand
 from app.widgets.layout_schema import managed_geometry_disabled
 
 HANDLE_NAMES = ("nw", "n", "ne", "w", "e", "sw", "s", "se")
@@ -302,9 +303,37 @@ class SelectionController:
                     "width": end_w, "height": end_h,
                 }
                 if before != after:
-                    self.project.history.push(
-                        ResizeCommand(r["nid"], before, after),
-                    )
+                    changed = {
+                        k: (before[k], after[k])
+                        for k in before if before[k] != after[k]
+                    }
+                    # Resizing a container re-bakes the axis-derived rows of its
+                    # children (their px is a share of its size). Fold those into
+                    # the same undo step instead of pushing a second command.
+                    cascade: dict = {}
+                    resized = self.project.get_widget(r["nid"])
+                    if resized is not None and (resized.children or []):
+                        from app.widgets.extra_params import sync_sizes_cascade
+                        for child in resized.children:
+                            for _wid, _changes in sync_sizes_cascade(child).items():
+                                if not _changes:
+                                    continue
+                                cascade.setdefault(_wid, {}).update(_changes)
+                                for _name, (_b, _v) in _changes.items():
+                                    if _v is not None:
+                                        self.project.event_bus.publish(
+                                            "property_changed", _wid, _name, _v,
+                                        )
+                    if cascade:
+                        self.project.history.push(
+                            MultiNodePropertyCommand(
+                                [(r["nid"], changed), *cascade.items()],
+                            ),
+                        )
+                    else:
+                        self.project.history.push(
+                            ResizeCommand(r["nid"], before, after),
+                        )
         self.draw()
 
     # ------------------------------------------------------------------

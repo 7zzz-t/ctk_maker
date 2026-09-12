@@ -158,6 +158,39 @@ class MultiChangePropertyCommand(Command):
         project.select_widget(self.widget_id)
 
 
+class MultiNodePropertyCommand(Command):
+    """Atomic property changes spanning several widgets — one undo step
+    per user action.
+
+    ``MultiChangePropertyCommand`` bundles many props on ONE widget and
+    ``MultiWidgetPropertyCommand`` one prop across many. This one covers
+    the mixed case: a change on one widget drags *derived* fields along
+    on its descendants — the axis cascade, where resizing a vbox/hbox
+    container re-bakes each child's ``width``/``height``.
+
+    ``entries`` is ``[(widget_id, {prop: (before, after)})]``.
+    """
+
+    def __init__(self, entries: list):
+        self.entries = [(wid, dict(changes)) for wid, changes in entries]
+        total = sum(len(changes) for _wid, changes in self.entries)
+        self.description = f"Change {total} properties across nodes"
+
+    def _apply(self, project: "Project", take_after: bool) -> None:
+        for widget_id, changes in self.entries:
+            for name, (before, after) in changes.items():
+                project.update_property(
+                    widget_id, name, after if take_after else before,
+                )
+
+    def undo(self, project: "Project") -> None:
+        self._apply(project, False)
+
+    def redo(self, project: "Project") -> None:
+        self._apply(project, True)
+
+
+
 class MultiWidgetPropertyCommand(Command):
     """Atomic property batch spanning several widgets — one undo step.
 
